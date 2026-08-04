@@ -1,0 +1,33 @@
+turbulence-agent/
++-- CLAUDE.md
++-- .env
++-- requirements.txt
++-- app/
+¦   +-- __init__.py
+¦   +-- config.py           # settings from .env
+¦   +-- sources/            # one module per external data source
+¦   ¦   +-- __init__.py
+¦   ¦   +-- awc.py          # PIREPs, G-AIRMET, SIGMET
+¦   ¦   +-- gtgn.py         # NOAA GTG Nowcast GRIB2
+¦   ¦   +-- schedules.py    # AeroAPI
+¦   +-- geo/
+¦   ¦   +-- __init__.py
+¦   ¦   +-- route.py        # great-circle path, corridor buffer
+¦   ¦   +-- intersect.py    # point-in-polygon, corridor crossing
+¦   +-- scoring/
+¦   ¦   +-- __init__.py
+¦   ¦   +-- turbulence.py   # PURE FUNCTION. no LLM, no I/O.
+¦   +-- memory/
+¦   ¦   +-- __init__.py
+¦   ¦   +-- db.py           # SQLite schema + connection
+¦   ¦   +-- cache.py        # TTL-enforced cache
+¦   +-- agent/
+¦   ¦   +-- __init__.py
+¦   ¦   +-- state.py        # LangGraph state definition
+¦   ¦   +-- tools.py        # @tool wrappers around sources/ and geo/
+¦   ¦   +-- graph.py        # the nested loop
+¦   +-- web/
+¦       +-- main.py         # FastAPI app
+¦       +-- templates/
+¦       +-- static/
++-- tests/
