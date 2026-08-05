@@ -1,0 +1,76 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "icaoId": "KWBC",
+    "rawOb": "DRO UUA /OV DRO223010/TM 2120/FL105/TP BE95/TB SEV/RM ZDVWC-36 MOD TO SEV CHOP",
+    "airepType": "Urgent PIREP",
+    "acType": "BE95",
+    "fltlvlType": "OTHER",
+    "receiptTime": "2026-08-04T21:35:29.437Z",
+    "obsTime": "2026-08-04T21:20:00.000Z",
+    "fltlvl": 105,
+    "tbInt1": "SEV",
+    "tbType1": "CHOP",
+    "aircraft": "Beech Travel Air",
+    "wake": "L"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -107.9245,
+     37.0626
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "icaoId": "KWBC",
+    "rawOb": "AXV UA /OV ROD330015/TM 2103/FL350/TP B737/TB INTMT SEV MOD OCNL LGT 350/RM ZOB",
+    "airepType": "PIREP",
+    "acType": "B737",
+    "fltlvlType": "OTHER",
+    "receiptTime": "2026-08-04T21:10:04.917Z",
+    "obsTime": "2026-08-04T21:03:00.000Z",
+    "fltlvl": 350,
+    "tbInt1": "SEV",
+    "tbFreq1": "INT",
+    "aircraft": "Boeing 737-700",
+    "wake": "M"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -84.2313,
+     40.4921
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "icaoId": "KWBC",
+    "rawOb": "SJT UUA /OV SJT135035/TM 2010/FL100/TP BE30/TB SEVERE TURB FL100/RM ZHU",
+    "airepType": "Urgent PIREP",
+    "acType": "BE30",
+    "fltlvlType": "OTHER",
+    "receiptTime": "2026-08-04T20:20:25.451Z",
+    "obsTime": "2026-08-04T20:10:00.000Z",
+    "fltlvl": 100,
+    "tbInt1": "SEV",
+    "aircraft": "Beech Super King Air",
+    "wake": "L"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -100.0657,
+     30.8974
+    ]
+   }
+  }
+ ]
+}
