@@ -1,0 +1,7 @@
+Implement app/sources/awc.py with a function fetch_pireps(bbox, hours_back) that
+queries https://aviationweather.gov/api/data/pirep with GeoJSON output. Return a list
+of Pydantic PilotReport models with: latitude, longitude, altitude_ft,
+turbulence_severity (enum NONE/LIGHT/MODERATE/SEVERE/EXTREME), aircraft_type,
+observation_time (timezone-aware UTC), raw_text, and fetched_at. Use httpx with the
+User-Agent from config. Write the tests first using a recorded JSON fixture � do not
+hit the live API in tests.

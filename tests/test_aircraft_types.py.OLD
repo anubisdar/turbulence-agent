@@ -1,0 +1,171 @@
+"""
+Tests for the aircraft type normalizer.
+
+The first class is the one that matters. Everything else is coverage; those
+are the assertions the Checkpoint 3 failure-mode argument rests on.
+"""
+
+import pytest
+
+#from aircraft_types import Confidence, resolve
+from app.retrieval.aircraft_types import Confidence, resolve
+
+
+class TestVariantCollapse:
+    """A MAX must never share a bucket with a Next Generation airframe."""
+
+    def test_max_8_and_737_800_are_different_types(self):
+        max8 = resolve("BOEING", "737-8")
+        ng800 = resolve("BOEING", "737-8H4")
+        assert max8.variant == "737 MAX 8"
+        assert ng800.variant == "737-800"
+        assert max8.key != ng800.key
+        assert max8.generation == "MAX"
+        assert ng800.generation == "NG"
+
+    @pytest.mark.parametrize("model", ["737-832", "737-823", "737-824", "737-8H4", "737-800"])
+    def test_all_customer_coded_800s_collapse_to_one_bucket(self, model):
+        assert resolve("BOEING", model).variant == "737-800"
+
+    def test_max_9_is_not_a_737_900(self):
+        assert resolve("BOEING", "737-9").variant == "737 MAX 9"
+        assert resolve("BOEING", "737-924ER").variant == "737-900"
+
+    def test_max_7_is_not_a_737_700(self):
+        assert resolve("BOEING", "737-7").variant == "737 MAX 7"
+        assert resolve("BOEING", "737-7H4").variant == "737-700"
+
+    def test_787_single_digit_suffix_is_a_series_not_a_max(self):
+        """The 737 MAX rule must not leak onto the Dreamliner."""
+        r = resolve("BOEING", "787-9")
+        assert r.variant == "787-9"
+        assert r.generation != "MAX"
+
+    def test_neo_and_ceo_are_different_types(self):
+        neo = resolve("AIRBUS", "A321-271N")
+        ceo = resolve("AIRBUS", "A321-231")
+        assert neo.generation == "neo"
+        assert ceo.generation == "ceo"
+        assert neo.key != ceo.key
+
+
+class TestNoGuessing:
+    """Unresolvable input is marked, never bucketed into something plausible."""
+
+    def test_nonexistent_series_falls_back_to_family(self):
+        """There is no A320-300. A mis-entered code must not invent one."""
+        r = resolve("AIRBUS", "A320-321")
+        assert r.family == "A320"
+        assert r.variant is None
+        assert r.confidence is Confidence.FAMILY_ONLY
+
+    @pytest.mark.parametrize("make,model", [
+        ("", ""),
+        ("BOEING", ""),
+        ("NOT A REAL MANUFACTURER", "737-800"),
+        ("BOEING", "QQQQ"),
+    ])
+    def test_garbage_is_unresolved(self, make, model):
+        r = resolve(make, model)
+        assert not r.usable
+        assert r.key == "UNRESOLVED"
+
+    def test_bare_family_is_not_promoted_to_a_variant(self):
+        r = resolve("BOEING", "737")
+        assert r.family == "737"
+        assert r.variant is None
+        assert r.confidence is Confidence.FAMILY_ONLY
+
+
+class TestSeparatorNoise:
+    @pytest.mark.parametrize("a,b", [
+        ("737-7H4", "737 7H4"),
+        ("767-332", "767 332"),
+        ("A321-231", "A321 231"),
+        ("A319-114", "A-319-114"),
+        ("CL-600-2B19", "CL 600 2B19"),
+    ])
+    def test_whitespace_and_hyphens_do_not_split_a_fleet(self, a, b):
+        make = "AIRBUS" if a.startswith("A") else ("BOMBARDIER" if a.startswith("CL") else "BOEING")
+        assert resolve(make, a).key == resolve(make, b).key
+
+    def test_bare_airbus_number_gets_its_prefix(self):
+        assert resolve("AIRBUS", "320-200").variant == "A320-200"
+
+
+class TestManufacturerAliases:
+    @pytest.mark.parametrize("make", [
+        "AIRBUS", "AIRBUS INDUSTRIE", "AIRBUS SAS",
+    ])
+    def test_airbus_aliases(self, make):
+        assert resolve(make, "A320-232").manufacturer == "Airbus"
+
+    @pytest.mark.parametrize("make", [
+        "BOMBARDIER", "BOMBARDIER INC", "BOMBARDIER, INC.", "CANADAIR",
+    ])
+    def test_bombardier_aliases_including_pre_1986_name(self, make):
+        r = resolve(make, "CL-600-2B19")
+        assert r.manufacturer == "Bombardier"
+        assert r.variant == "CRJ-200"
+
+    @pytest.mark.parametrize("make", [
+        "EMBRAER", "EMBRAER S A", "EMBRAER-EMPRESA BRASILEIRA DE",
+    ])
+    def test_embraer_aliases(self, make):
+        assert resolve(make, "EMB-145LR").manufacturer == "Embraer"
+
+
+class TestTypeCertificateNames:
+    """Investigators file the certificate name; users type the marketing name."""
+
+    def test_dc9_82_is_an_md82(self):
+        assert resolve("MCDONNELL DOUGLAS", "DC-9-82").variant == "MD-82"
+
+    def test_erj_170_200_is_an_e175(self):
+        assert resolve("EMBRAER S A", "ERJ 170-200 LR").variant == "E175"
+
+    @pytest.mark.parametrize("model,expected", [
+        ("CL-600-2B19", "CRJ-200"),
+        ("CL-600-2C10", "CRJ-700"),
+        ("CL-600-2D24", "CRJ-900"),
+    ])
+    def test_challenger_certificate_names_map_to_crj(self, model, expected):
+        assert resolve("BOMBARDIER INC", model).variant == expected
+
+    def test_fokker_f28_mk_0100_is_a_fokker_100(self):
+        assert resolve("FOKKER", "F28 MK 0100").variant == "Fokker 100"
+
+
+class TestCustomerCodeDecoding:
+    @pytest.mark.parametrize("model,expected", [
+        ("757-232", "757-200"),
+        ("767-332", "767-300"),
+        ("777-223", "777-200"),
+        ("747-422", "747-400"),
+        ("747-47UF", "747-400"),
+        ("737-3H4", "737-300"),
+        ("737-524", "737-500"),
+    ])
+    def test_boeing_customer_codes(self, model, expected):
+        assert resolve("BOEING", model).variant == expected
+
+    @pytest.mark.parametrize("model,expected", [
+        ("A319-111", "A319-100"),
+        ("A320-214", "A320-200"),
+        ("A330-323", "A330-300"),
+        ("A330-243", "A330-200"),
+        ("A350-941", "A350-900"),
+    ])
+    def test_airbus_engine_codes(self, model, expected):
+        assert resolve("AIRBUS", model).variant == expected
+
+
+class TestGenerationLabels:
+    @pytest.mark.parametrize("model,gen", [
+        ("737-200", "Original"),
+        ("737-300", "Classic"),
+        ("737-800", "NG"),
+        ("737-8", "MAX"),
+    ])
+    def test_737_generations(self, model, gen):
+        assert resolve("BOEING", model).generation == gen

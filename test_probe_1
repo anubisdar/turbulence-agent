@@ -1,0 +1,276 @@
+Requesting Aviation cases 2024-01-01 .. 2024-01-31
+
+HTTP 200  content-type=application/octet-stream
+Saved 152,550 bytes -> data/ntsb_probe/raw_2024-01-01_2024-01-31.bin
+
+ZIP members:
+  readme.txt  (672 bytes)
+  cases2026-08-05_20-40.json  (766,090 bytes)
+
+Top level: list of 93
+
+=== FIELD PATHS (first record) ===
+  accidentSiteCondition                                        str (len 3)
+  airportId                                                    str (len 3)
+  airportName                                                  str (len 23)
+  analysisNarrative                                            str (len 2406)
+  cm_HazmatInvolved                                            bool (len 5)
+  cm_Latitude                                                  float (len 9)
+  cm_Longitude                                                 float (len 10)
+  cm_agency                                                    str (len 4)
+  cm_boardLaunch                                               bool (len 5)
+  cm_boardMeetingDate                                          NoneType (len 0)
+  cm_city                                                      str (len 6)
+  cm_closed                                                    bool (len 4)
+  cm_completionStatus                                          str (len 9)
+  cm_country                                                   str (len 3)
+  cm_docketDate                                                NoneType (len 0)
+  cm_docketOriginalPublishDate                                 str (len 20)
+  cm_eventDate                                                 str (len 20)
+  cm_eventType                                                 str (len 3)
+  cm_fatalInjuryCount                                          int (len 1)
+  cm_hasSafetyRec                                              bool (len 5)
+  cm_hasonGroundInjuryMatrix                                   bool (len 4)
+  cm_highestInjury                                             str (len 4)
+  cm_injuryOnboardCount                                        int (len 1)
+  cm_injuryOngroundCount                                       int (len 1)
+  cm_injury_onboard_Fatal                                      int (len 1)
+  cm_injury_onboard_Minor                                      int (len 1)
+  cm_injury_onboard_Serious                                    int (len 1)
+  cm_injury_onground_Fatal                                     int (len 1)
+  cm_injury_onground_Minor                                     int (len 1)
+  cm_injury_onground_Serious                                   int (len 1)
+  cm_isStudy                                                   bool (len 5)
+  cm_launch                                                    str (len 4)
+  cm_minorInjuryCount                                          int (len 1)
+  cm_mkey                                                      int (len 6)
+  cm_mode                                                      str (len 8)
+  cm_mostRecentReportType                                      str (len 5)
+  cm_ntsbNum                                                   str (len 10)
+  cm_onboard_None                                              int (len 1)
+  cm_onboard_Total                                             int (len 1)
+  cm_originalPublishedDate                                     str (len 20)
+  cm_probableCause                                             str (len 147)
+  cm_recentReportPublishDate                                   str (len 24)
+  cm_reportDate                                                NoneType (len 0)
+  cm_reportNum                                                 NoneType (len 0)
+  cm_reportType                                                str (len 13)
+  cm_seriousInjuryCount                                        int (len 1)
+  cm_state                                                     str (len 2)
+  cm_topicMode                                                 str (len 8)
+  cm_vehicles                                                  list
+  cm_vehicles[].DamageLevel                                    str (len 11)
+  cm_vehicles[].ExplosionType                                  str (len 4)
+  cm_vehicles[].FireType                                       str (len 4)
+  cm_vehicles[].SerialNumber                                   str (len 10)
+  cm_vehicles[].airMedical                                     bool (len 5)
+  cm_vehicles[].airMedicalType                                 NoneType (len 0)
+  cm_vehicles[].aircraftCategory                               str (len 3)
+  cm_vehicles[].amateurBuilt                                   bool (len 5)
+  cm_vehicles[].cm_engines                                     list
+  cm_vehicles[].cm_engines[].cm_engineNum                      int (len 1)
+  cm_vehicles[].cm_engines[].engineType                        str (len 3)
+  cm_vehicles[].cm_events                                      list
+  cm_vehicles[].cm_events[].cicttEventSOEGroup                 str (len 4)
+  cm_vehicles[].cm_events[].cicttPhaseSOEGroup                 str (len 8)
+  cm_vehicles[].cm_events[].cm_eventCode                       str (len 6)
+  cm_vehicles[].cm_events[].cm_eventNum                        int (len 1)
+  cm_vehicles[].cm_events[].cm_isDefiningEvent                 bool (len 4)
+  cm_vehicles[].cm_events[].cm_sequenceNum                     int (len 1)
+  cm_vehicles[].cm_events[].cm_tier1Name                       str (len 29)
+  cm_vehicles[].cm_events[].cm_tier1Num                        str (len 3)
+  cm_vehicles[].cm_events[].cm_tier2Name                       str (len 15)
+  cm_vehicles[].cm_events[].cm_tier2Num                        str (len 3)
+  cm_vehicles[].cm_findings                                    list
+  cm_vehicles[].cm_findings[].cm_findingCode                   str (len 10)
+  cm_vehicles[].cm_findings[].cm_findingNum                    int (len 1)
+  cm_vehicles[].cm_findings[].cm_findingReportText             str (len 72)
+  cm_vehicles[].cm_findings[].cm_findingText                   str (len 101)
+  cm_vehicles[].cm_findings[].cm_inPc                          bool (len 4)
+  cm_vehicles[].cm_injuries                                    list
+  cm_vehicles[].cm_injuries[].cm_crew_Fatal                    int (len 1)
+  cm_vehicles[].cm_injuries[].cm_crew_Minor                    int (len 1)
+  cm_vehicles[].cm_injuries[].cm_crew_None                     int (len 1)
+  cm_vehicles[].cm_injuries[].cm_crew_Serious                  int (len 1)
+  cm_vehicles[].cm_injuries[].cm_hasonBoardInjuryMatrix        bool (len 4)
+  cm_vehicles[].cm_injuries[].cm_passengers_Fatal              int (len 1)
+  cm_vehicles[].cm_injuries[].cm_passengers_Minor              int (len 1)
+  cm_vehicles[].cm_injuries[].cm_passengers_None               int (len 1)
+  cm_vehicles[].cm_injuries[].cm_passengers_Serious            int (len 1)
+  cm_vehicles[].cm_vehicleNum                                  int (len 1)
+  cm_vehicles[].flightOperationType                            str (len 4)
+  cm_vehicles[].flightScheduledType                            NoneType (len 0)
+  cm_vehicles[].flightServiceType                              NoneType (len 0)
+  cm_vehicles[].flightTerminalType                             NoneType (len 0)
+  cm_vehicles[].gaFlight                                       bool (len 4)
+  cm_vehicles[].make                                           str (len 5)
+  cm_vehicles[].model                                          str (len 9)
+  cm_vehicles[].numberOfEngines                                int (len 1)
+  cm_vehicles[].operatorName                                   str (len 17)
+  cm_vehicles[].registeredOwner                                str (len 17)
+  cm_vehicles[].registrationNumber                             str (len 6)
+  cm_vehicles[].regulationFlightConductedUnder                 str (len 3)
+  cm_vehicles[].revenueSightseeing                             bool (len 5)
+  cm_vehicles[].secondPilotPresent                             bool (len 4)
+  factualNarrative                                             str (len 3154)
+  prelimNarrative                                              NoneType (len 0)
+
+=== ANSWERING THE TWO DESIGN QUESTIONS ===
+
+Q1 narrative-ish fields:
+  cm_probableCause
+  analysisNarrative
+  factualNarrative
+  prelimNarrative
+
+Q2 aircraft-type fields:
+  cm_vehicles[].aircraftCategory
+  cm_vehicles[].amateurBuilt
+  cm_vehicles[].make
+  cm_vehicles[].model
+  cm_vehicles[].numberOfEngines
+  cm_vehicles[].registrationNumber
+  cm_vehicles[].cm_engines
+  cm_vehicles[].cm_engines[].cm_engineNum
+  cm_vehicles[].cm_engines[].engineType
+
+=== LONGEST TEXT FIELDS (sampled over 50 records) ===
+    15,840  factualNarrative
+     3,612  analysisNarrative
+       507  cm_probableCause
+       130  cm_vehicles[].cm_findings[].cm_findingText
+        73  cm_vehicles[].cm_findings[].cm_findingReportText
+        41  cm_vehicles[].cm_events[].cicttEventSOEGroup
+        38  airportName
+        38  cm_vehicles[].cm_events[].cm_tier2Name
+        34  cm_vehicles[].operatorName
+        34  cm_vehicles[].registeredOwner
+        31  cm_vehicles[].cm_events[].cm_tier1Name
+        28  cm_vehicles[].make
+        24  cm_recentReportPublishDate
+        20  cm_originalPublishedDate
+        20  cm_vehicles[].cm_events[].cicttPhaseSOEGroup
+
+=== ONE FULL RECORD (truncated to 6000 chars) ===
+{
+  "cm_mkey": 193746,
+  "airportId": "CXW",
+  "airportName": "Conway Regional Airport",
+  "cm_closed": true,
+  "cm_completionStatus": "Completed",
+  "cm_hasSafetyRec": false,
+  "cm_highestInjury": "None",
+  "cm_isStudy": false,
+  "cm_mode": "Aviation",
+  "cm_ntsbNum": "CEN24LA108",
+  "cm_originalPublishedDate": "2024-11-07T05:00:00Z",
+  "cm_vehicles": [
+    {
+      "cm_vehicleNum": 1,
+      "DamageLevel": "Substantial",
+      "ExplosionType": "None",
+      "FireType": "None",
+      "cm_injuries": [
+        {
+          "cm_hasonBoardInjuryMatrix": true,
+          "cm_crew_Fatal": 0,
+          "cm_crew_Minor": 0,
+          "cm_crew_None": 2,
+          "cm_crew_Serious": 0,
+          "cm_passengers_Fatal": 0,
+          "cm_passengers_Minor": 0,
+          "cm_passengers_None": 0,
+          "cm_passengers_Serious": 0
+        }
+      ],
+      "SerialNumber": "28-7205028",
+      "aircraftCategory": "AIR",
+      "amateurBuilt": false,
+      "make": "PIPER",
+      "model": "PA-28-180",
+      "numberOfEngines": 1,
+      "registrationNumber": "N2184T",
+      "gaFlight": true,
+      "cm_events": [
+        {
+          "cm_eventNum": 1,
+          "cicttEventSOEGroup": "Fuel",
+          "cicttPhaseSOEGroup": "Approach",
+          "cm_eventCode": "506191",
+          "cm_isDefiningEvent": true,
+          "cm_sequenceNum": 1,
+          "cm_tier1Name": "Approach-VFR pattern downwind",
+          "cm_tier1Num": "506",
+          "cm_tier2Name": "Fuel starvation",
+          "cm_tier2Num": "191"
+        }
+      ],
+      "cm_findings": [
+        {
+          "cm_findingNum": 1,
+          "cm_findingCode": "0204101546",
+          "cm_findingReportText": "Personnel issues Incorrect action performance - Student/instructed pilot",
+          "cm_findingText": "Personnel issues - Action/decision - Action - Incorrect action performance - Student/instructed pilot",
+          "cm_inPc": true
+        },
+        {
+          "cm_findingNum": 2,
+          "cm_findingCode": "0107101025",
+          "cm_findingReportText": "Aircraft Fuel - Fluid management",
+          "cm_findingText": "Aircraft - Fluids/misc hardware - Fluids - Fuel - Fluid management",
+          "cm_inPc": true
+        },
+        {
+          "cm_findingNum": 3,
+          "cm_findingCode": "0204151040",
+          "cm_findingReportText": "Personnel issues Identification/recognition - Instructor/check pilot",
+          "cm_findingText": "Personnel issues - Action/decision - Info processing/decision - Identification/recognition - Instructor/check pilot",
+          "cm_inPc": false
+        },
+        {
+          "cm_findingNum": 4,
+          "cm_findingCode": "0206301546",
+          "cm_findingReportText": "Personnel issues Use of equip/system - Student/instructed pilot",
+          "cm_findingText": "Personnel issues - Task performance - Use of equip/info - Use of equip/system - Student/instructed pilot",
+          "cm_inPc": true
+        }
+      ],
+      "cm_engines": [
+        {
+          "cm_engineNum": 1,
+          "engineType": "REC"
+        }
+      ],
+      "airMedical": false,
+      "airMedicalType": null,
+      "flightOperationType": "INST",
+      "flightScheduledType": null,
+      "flightServiceType": null,
+      "flightTerminalType": null,
+      "operatorName": "FISHER GLOBAL LLC",
+      "registeredOwner": "FISHER GLOBAL LLC",
+      "regulationFlightConductedUnder": "091",
+      "revenueSightseeing": false,
+      "secondPilotPresent": true
+    }
+  ],
+  "cm_recentReportPublishDate": "2024-02-06T01:38:04.012Z",
+  "cm_mostRecentReportType": "Final",
+  "cm_probableCause": "The student pilot's improper movement of the fuel selector to the OFF position, which resulted in fuel starvation and a total loss of engine power.",
+  "cm_HazmatInvolved": false,
+  "cm_Latitude": 35.010222,
+  "cm_Longitude": -92.575675,
+  "cm_city": "Conway",
+  "cm_country": "USA",
+  "cm_eventDate": "2024-01-31T18:22:00Z",
+  "cm_state": "AR",
+  "cm_agency": "NTSB",
+  "cm_boardLaunch": false,
+  "cm_boardMeetingDate": null,
+  "cm_docketDate": null,
+  "cm_eventType": "ACC",
+  "cm_launch": "None",
+  "cm_reportDate": null,
+  "cm_reportNum": null,
+  "cm_reportType": "DirectorBrief",
+  "analysisNarrative": "The flight instructor and student pilot were conducting an instructional flight in an airplane in which the student had only accumulated 1.2 hours of flight time. During the flight, the student performed one touch-and-go landing, then continued in the traffic pattern. While on the downwind leg, their preset fuel reminder to switch fuel tanks alerted on the GPS. At the direction of the flight instructor, the student turned on the fuel pump and repositioned the fuel selector handle to what he thought was the left fuel tank position. Shortly after, the student noted that the engine would not respond to throttle inputs and had sustained a loss of power. The flight instructor took control of the airplane and performed a forced landing to a field. During the landing, the nose landing gear collapsed, and the right wing sustained substantial damage. The student reported that during the egress he turned the fuel selector handle to the OFF position. The flight instructor stated that he did not direct the student to switch the fuel selector to the OFF position after the accident and he did not recall any postaccident discussion about the fuel selector. &#x0D;\nPostaccident examination of the airplane found that the fuel selector handle was positioned toward the OFF position, but it was not completely seated in the detent. A subsequent detailed examination determined that the fuel selector valve worked as expected with a steady flow of fuel when positioned to the left tank and right tank positions. There was no fuel flow when positioned to OFF. When the handle was moved to the same position where it was found after the accident, the fuel flow was restricted and would not have provided enough fuel flow for the engine to increase power when the throttle was advanced. There were no other preaccident mechani

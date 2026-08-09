@@ -1,0 +1,166 @@
+Range 2023-01-01 .. 2023-12-31   (cache: data/ntsb_cache/)
+  fetched 2023-01-01 .. 2023-04-02  ( 344 records)
+  fetched 2023-04-03 .. 2023-07-03  ( 481 records)
+  CAP HIT 2023-07-04 .. 2023-10-03 -> splitting
+  fetched 2023-07-04 .. 2023-08-18  ( 295 records)
+  fetched 2023-08-19 .. 2023-10-03  ( 236 records)
+  fetched 2023-10-04 .. 2023-12-31  ( 320 records)
+
+======================================================================
+TOTAL CASES: 1,676
+======================================================================
+
+--- FAR Part distribution (cases, may double-count multi-vehicle) ---
+  091          1,065    63.5%
+  NUSN           237    14.1%
+  NUSC           142     8.5%
+  137             59     3.5%
+  121             57     3.4%
+  135             41     2.4%
+  129             40     2.4%
+  UNK             27     1.6%
+  133              9     0.5%
+  PUBU             7     0.4%
+  (none)           2     0.1%
+  103              1     0.1%
+  091K             1     0.1%
+  107              1     0.1%
+
+  Part 121 (scheduled air carrier): 57
+  Part 135 (commuter / on-demand):  41
+
+--- Part 121 cases by year ---
+  2023  ######################################################### 57
+
+--- Part 121 event type ---
+  ACC          32
+  INC          23
+  OCC           2
+
+--- Part 121 MAKE strings (raw, as entered) ---
+     38  BOEING
+     14  AIRBUS
+      4  EMBRAER
+      2  BOMBARDIER INC
+      2  CESSNA
+      1  MCDONNELL DOUGLAS AIRCRAFT CO
+      1  LEARJET INC
+      1  EMBRAER S A
+      1  AIRBUS INDUSTRIE
+      1  TEXTRON AVIATION INC
+      1  AIRBUS SAS
+      1  AEROSPATIALE/AERITALIA
+
+--- Part 121 MAKE + MODEL pairs (this is your normalization problem) ---
+      4  BOEING                       | 737
+      3  BOEING                       | 737-9
+      2  BOEING                       | 737-823
+      2  AIRBUS                       | A320-232
+      2  BOEING                       | 737-8
+      2  EMBRAER                      | ERJ 190-100 IGW
+      2  BOMBARDIER INC               | CL-600-2D24
+      2  BOEING                       | 767-300F
+      2  BOEING                       | 777-222
+      2  BOEING                       | 777-223
+      2  EMBRAER                      | ERJ170
+      2  BOEING                       | 737-924ER
+      2  BOEING                       | 767-322
+      2  BOEING                       | 767-332
+      2  AIRBUS                       | A320-214
+      1  MCDONNELL DOUGLAS AIRCRAFT CO | MD-88
+      1  BOEING                       | 777-224
+      1  AIRBUS                       | A320-251N
+      1  LEARJET INC                  | 60
+      1  EMBRAER S A                  | ERJ 170-200 LL
+      1  AIRBUS                       | 321
+      1  AIRBUS                       | A319-132
+      1  BOEING                       | 757
+      1  BOEING                       | 737-79P
+      1  BOEING                       | 767-32LF
+      1  CESSNA                       | 208B
+      1  BOEING                       | 737-900ER
+      1  AIRBUS                       | A330-323
+      1  AIRBUS                       | A330
+      1  BOEING                       | 717-200
+      1  AIRBUS INDUSTRIE             | A320-232
+      1  AIRBUS                       | A320-233
+      1  AIRBUS                       | A321-231
+      1  BOEING                       | 757-232
+      1  BOEING                       | 737-7BD
+      1  TEXTRON AVIATION INC         | 560XL
+      1  BOEING                       | 747-481F
+      1  AIRBUS                       | A320
+      1  AIRBUS                       | A330-941
+      1  BOEING                       | 747
+      1  BOEING                       | 757-23A
+      1  BOEING                       | 787-8
+      1  AIRBUS SAS                   | A350-941
+      1  AEROSPATIALE/AERITALIA       | ATR 42-300
+      1  BOEING                       | 737-890
+      1  BOEING                       | 717
+      1  AIRBUS                       | A321-271N
+      1  CESSNA                       | 172N
+      1  BOEING                       | 757-236
+
+  distinct make strings:  12
+  distinct make+model:    49
+
+--- Boeing/Airbus model strings only (variant collapse preview) ---
+
+  BOEING: 25 distinct model strings
+        4  737
+        3  737-9
+        2  737-823
+        2  737-8
+        2  767-300F
+        2  777-222
+        2  777-223
+        2  737-924ER
+        2  767-322
+        2  767-332
+        1  777-224
+        1  757
+        1  737-79P
+        1  767-32LF
+        1  737-900ER
+        1  717-200
+        1  757-232
+        1  737-7BD
+        1  747-481F
+        1  747
+        1  757-23A
+        1  787-8
+        1  737-890
+        1  717
+        1  757-236
+
+  AIRBUS: 13 distinct model strings
+        3  A320-232
+        2  A320-214
+        1  A320-251N
+        1  321
+        1  A319-132
+        1  A330-323
+        1  A330
+        1  A320-233
+        1  A321-231
+        1  A320
+        1  A330-941
+        1  A350-941
+        1  A321-271N
+
+--- Narrative availability (Part 121) ---
+  cm_probableCause     present in    43/57 (75.4%)  median    156  max   1,026 chars
+  analysisNarrative    present in    43/57 (75.4%)  median  2,696  max  12,624 chars
+  factualNarrative     present in    13/57 (22.8%)  median 14,164  max  39,117 chars
+  prelimNarrative      present in     0/57
+
+--- Narrative availability by era (analysisNarrative, Part 121) ---
+  2020s     43/57      75.4%
+
+--- Estimated embedding load (Part 121, ~1200 char chunks) ---
+  approx chunks: 362
+  at ~40 chunks/sec on CPU: ~0.2 minutes to embed
+
+--- Same estimate if you included Part 135 too ---
+  additional chunks: 309
