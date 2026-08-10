@@ -104,6 +104,25 @@ def tokenize(route: str) -> list[str]:
 # ------------------------------------------------------------------ storage
 
 
+def _normalize_type(raw) -> str | None:
+    """Fold AeroAPI's inconsistent casing without mangling acronyms.
+
+    The same kind of thing comes back as both "Waypoint" and "WAYPOINT",
+    which splits the cache statistics in two. But "VOR" and "VOR-DME
+    (NAVAID)" are acronyms and must stay as they are, so only long,
+    fully-alphabetic, fully-uppercase words are folded.
+    """
+    if not raw:
+        return None
+    out = []
+    for word in str(raw).split():
+        if word.isalpha() and word.isupper() and len(word) > 4:
+            out.append(word.capitalize())
+        else:
+            out.append(word)
+    return " ".join(out)
+
+
 def init_fixes(conn: sqlite3.Connection) -> None:
     conn.executescript(FIXES_DDL)
     conn.commit()
@@ -124,6 +143,7 @@ def upsert_fixes(conn: sqlite3.Connection, fixes: list[dict],
         lat, lon = f.get("latitude"), f.get("longitude")
         if not name or lat is None or lon is None:
             continue
+        fix_type = _normalize_type(f.get("type"))
         conn.execute(
             """INSERT INTO route_fixes
                    (name, latitude, longitude, fix_type, seen_count,
@@ -135,7 +155,7 @@ def upsert_fixes(conn: sqlite3.Connection, fixes: list[dict],
                    fix_type   = COALESCE(excluded.fix_type, route_fixes.fix_type),
                    seen_count = route_fixes.seen_count + 1,
                    last_seen  = excluded.last_seen""",
-            (name, float(lat), float(lon), f.get("type"), now, now, source),
+            (name, float(lat), float(lon), fix_type, now, now, source),
         )
         stored += 1
     conn.commit()

@@ -56,6 +56,16 @@ from app.reasoning.geometry import (
 from app.sources.aeroapi import AeroAPIClient, AeroAPIError, FlightSegment
 from app.sources.fixes import resolve_route, upsert_fixes
 
+#: A flown track includes taxi, climb and descent. Turbulence exposure that
+#: matters to a passenger is overwhelmingly at cruise, and a band derived
+#: from every position runs from the ground upward - which would match
+#: low-level advisories that have nothing to do with the cruise segment.
+#: Positions within this much of the maximum altitude are treated as cruise.
+CRUISE_BAND_FT = 4000
+
+#: Below this, a track has no meaningful cruise segment to band.
+MIN_CRUISE_ALTITUDE_FT = 10000
+
 #: Depth beyond which this generator has nothing further to offer. Depth 3
 #: was reserved for data-gap strategies, which need turbulence evidence to
 #: choose between - so it stays unused until the weather layer lands, rather
@@ -198,15 +208,31 @@ class CorridorGenerator:
             return None
 
         points = simplify_track([(p.latitude, p.longitude) for p in positions])
-        alts = [p.altitude_ft for p in positions if p.altitude_ft]
         self._note(
             f"Flown track from {flight.ident} departing {flight.actual_off}: "
             f"{len(positions)} positions thinned to {len(points)}."
         )
+
+        band = cruise_band(
+            [p.altitude_ft for p in positions if p.altitude_ft is not None])
+        if band:
+            self._note(
+                f"Cruise band from the flown track: "
+                f"FL{band[0] // 100:03d} to FL{band[1] // 100:03d}. Taxi, "
+                f"climb and descent positions are excluded - laterally the "
+                f"corridor covers the whole route, but vertically it covers "
+                f"the cruise segment."
+            )
+        else:
+            self._note(
+                "The flown track reached no identifiable cruise altitude, so "
+                "the corridor carries no altitude band."
+            )
+
         return self._corridor(
             "track", Provenance.ACTUAL_TRACK, points, gc_nm,
-            altitude_min=min(alts) if alts else None,
-            altitude_max=max(alts) if alts else None,
+            altitude_min=band[0] if band else None,
+            altitude_max=band[1] if band else None,
             label=f"flown track {flight.ident}",
         )
 
@@ -427,6 +453,21 @@ class CorridorGenerator:
         if parent is None:
             return []
         return self._altitude_branches(parent)
+
+
+def cruise_band(altitudes: list[int]) -> tuple[int, int] | None:
+    """The cruise portion of a flown track's altitude profile.
+
+    A track runs from the ground up, so min and max across all positions
+    gives a band starting below zero. Only positions near the top of climb
+    describe where the aircraft actually spent its cruise.
+    """
+    usable = [a for a in altitudes if a is not None and a >= MIN_CRUISE_ALTITUDE_FT]
+    if not usable:
+        return None
+    top = max(usable)
+    cruise = [a for a in usable if a >= top - CRUISE_BAND_FT]
+    return (min(cruise), top)
 
 
 def _lookup(conn, names):

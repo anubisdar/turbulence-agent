@@ -198,3 +198,29 @@ class TestCacheWarming:
         stats = cache_stats(db)
         assert stats["total"] == 6
         assert "VOR" in stats["by_type"]
+
+
+class TestTypeNormalisation:
+    """AeroAPI returns both 'Waypoint' and 'WAYPOINT' for the same thing,
+    which splits the cache statistics. Acronyms must survive the fold."""
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("WAYPOINT", "Waypoint"),
+        ("Waypoint", "Waypoint"),
+        ("VOR", "VOR"),
+        ("VOR-DME (NAVAID)", "VOR-DME (NAVAID)"),
+        ("VOR-TAC (NAVAID)", "VOR-TAC (NAVAID)"),
+        ("Reporting Point", "Reporting Point"),
+        ("Origin Airport", "Origin Airport"),
+        (None, None),
+    ])
+    def test_casing(self, raw, expected):
+        from app.sources.fixes import _normalize_type
+        assert _normalize_type(raw) == expected
+
+    def test_variants_land_in_one_bucket(self, db):
+        upsert_fixes(db, [
+            {"name": "A", "latitude": 1, "longitude": 1, "type": "Waypoint"},
+            {"name": "B", "latitude": 2, "longitude": 2, "type": "WAYPOINT"},
+        ])
+        assert cache_stats(db)["by_type"] == {"Waypoint": 2}

@@ -276,3 +276,40 @@ class TestOverlapWiring:
         fn = gen.overlap_fn
         assert fn(out["gc"], out["gc"]) == pytest.approx(1.0, abs=0.01)
         assert 0.0 <= fn(out["gc"], out["alternate"]) <= 1.0
+
+
+class TestCruiseBand:
+    """A flown track runs from the ground up. Banding a corridor from every
+    position gives a floor below zero, which would match low-level advisories
+    that have nothing to do with the cruise segment."""
+
+    PROFILE = [-100, 1000, 5000, 12000, 24000, 33000, 35000, 35000,
+               34000, 20000, 3000, 0]
+
+    def test_ground_positions_are_excluded(self):
+        from app.reasoning.generator import cruise_band
+        assert cruise_band(self.PROFILE) == (33000, 35000)
+
+    def test_the_floor_is_never_negative(self):
+        from app.reasoning.generator import cruise_band
+        band = cruise_band(self.PROFILE)
+        assert band[0] > 0
+
+    def test_a_track_that_never_climbed_has_no_band(self):
+        from app.reasoning.generator import cruise_band
+        assert cruise_band([-100, 500, 2000]) is None
+
+    def test_no_altitudes_at_all(self):
+        from app.reasoning.generator import cruise_band
+        assert cruise_band([]) is None
+
+    def test_the_corridor_uses_the_cruise_band(self):
+        gen, _ = make_gen()
+        gen(None, 1, Budget(max_tool_calls=12))
+        shape = gen.shapes["track"]
+        assert shape.altitude_min_ft is None or shape.altitude_min_ft > 0
+
+    def test_the_exclusion_is_reported(self):
+        gen, _ = make_gen()
+        gen(None, 1, Budget(max_tool_calls=12))
+        assert any("cruise" in n.lower() for n in gen.notes)
