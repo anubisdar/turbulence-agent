@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Corridor search &middot; turbulence agent</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+:root{
+  color-scheme:dark;
+  /* Dark is the default: a night enroute chart, corridors as lit overlays. */
+  --void:#080D13;      /* deepest ground */
+  --panel:#0E151E;     /* panel fill */
+  --raised:#18232F;    /* rows, inputs */
+  --rule:#2A3A4A;      /* hairlines */
+  --ink:#F0F5F9;       /* primary text */
+  --muted:#A8B8C6;     /* secondary text */
+  --dim:#7E90A0;       /* tertiary */
+  --live:#4CC9F0;      /* kept corridor */
+  --winner:#9BE8FF;    /* the selected corridor */
+  --dead:#8296A8;      /* pruned */
+  --caution:#FFC061;   /* aviation caution amber */
+  --alarm:#FF8577;
+  --on-live:#041521;   /* text sitting on the accent */
+  --seg-track:#26333F; /* unfilled portion of a score bar */
+  --caution-bg:#12100A;
+  --caution-ink:#D9C9A8;
+  --alarm-bg:#1A0F0E;
+  --alarm-ink:#FFC4BC;
+  --case-ink:#C7D5E0;
+  --note-ink:#BFCEDA;
+
+  --fd:'IBM Plex Sans Condensed',system-ui,sans-serif;
+  --fb:'IBM Plex Sans',system-ui,sans-serif;
+  --fm:'IBM Plex Mono',ui-monospace,monospace;
+}
+
+/* Light: a daytime chart. Accents darken because the same blue that reads
+   as lit on black reads as washed out on white. */
+[data-theme=light]{
+  color-scheme:light;
+  --void:#EDF1F5;
+  --panel:#FFFFFF;
+  --raised:#F3F6F9;
+  --rule:#CFD9E2;
+  --ink:#111C26;
+  --muted:#41535F;
+  --dim:#61717F;
+  --live:#0E7BA8;
+  --winner:#065A80;
+  --dead:#667785;
+  --caution:#9A5200;
+  --alarm:#B3271A;
+  --on-live:#FFFFFF;
+  --seg-track:#DEE6ED;
+  --caution-bg:#FDF6E7;
+  --caution-ink:#6B4A0F;
+  --alarm-bg:#FDEDEB;
+  --alarm-ink:#8C2118;
+  --case-ink:#33424E;
+  --note-ink:#3A4956;
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--void);color:var(--ink);
+  font-family:var(--fb);font-size:14px;line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3{font-family:var(--fd);font-weight:600;margin:0;letter-spacing:.01em}
+button,input,select{font:inherit;color:inherit}
+
+/* ---------------------------------------------------------- shell */
+.shell{display:grid;grid-template-rows:auto 1fr;height:100vh}
+
+.masthead{
+  display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;
+  padding:14px 20px;border-bottom:1px solid var(--rule);background:var(--panel);
+}
+.masthead h1{font-size:19px;text-transform:uppercase;letter-spacing:.09em}
+.masthead .sub{color:var(--dim);font-size:12px;font-family:var(--fm)}
+.masthead .spacer{flex:1}
+.themer{display:flex;border:1px solid var(--rule)}
+.themer button{
+  background:none;border:0;cursor:pointer;padding:5px 12px;color:var(--dim);
+  font-family:var(--fm);font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+}
+.themer button:hover{color:var(--ink)}
+.themer button[aria-pressed=true]{background:var(--live);color:var(--on-live)}
+
+.body{display:grid;grid-template-columns:340px 1fr;min-height:0}
+@media(max-width:900px){
+  .body{grid-template-columns:1fr;grid-template-rows:auto 1fr}
+  #map{min-height:44vh}
+}
+
+/* ---------------------------------------------------------- controls */
+.rail{
+  background:var(--panel);border-right:1px solid var(--rule);
+  overflow-y:auto;min-height:0;
+}
+.block{padding:16px 18px;border-bottom:1px solid var(--rule)}
+.eyebrow{
+  font-family:var(--fm);font-size:10px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--dim);margin-bottom:10px;
+}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+label{display:block}
+label span{
+  display:block;font-family:var(--fm);font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--muted);margin-bottom:4px;
+}
+input[type=text],input[type=number]{
+  width:100%;background:var(--raised);border:1px solid var(--rule);
+  padding:8px 10px;font-family:var(--fm);font-size:14px;border-radius:0;
+}
+input:focus-visible,button:focus-visible,.row:focus-visible,.tab:focus-visible{
+  outline:2px solid var(--live);outline-offset:2px;
+}
+.toggles{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.toggle{display:flex;align-items:center;gap:9px;cursor:pointer;color:var(--muted)}
+.toggle input{accent-color:var(--live);width:15px;height:15px}
+.toggle:hover{color:var(--ink)}
+
+.go{
+  width:100%;margin-top:14px;padding:11px;cursor:pointer;
+  background:var(--live);color:var(--on-live);border:0;border-radius:0;
+  font-family:var(--fd);font-weight:700;font-size:14px;
+  text-transform:uppercase;letter-spacing:.12em;
+}
+.go:hover{background:var(--winner)}
+.go[disabled]{background:var(--dim);color:var(--panel);cursor:progress}
+body{transition:background .18s,color .18s}
+
+/* ---------------------------------------------------------- verdict */
+.verdict{padding:14px 18px;border-bottom:1px solid var(--rule)}
+.reading{
+  font-family:var(--fd);font-size:26px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.05em;color:var(--caution);
+}
+.reading.known{color:var(--live)}
+.reading-note{color:var(--muted);font-size:12.5px;margin-top:4px}
+.stats{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:1px;
+  background:var(--rule);border:1px solid var(--rule);margin-top:14px;
+}
+.stat{background:var(--panel);padding:8px 10px}
+.stat b{display:block;font-family:var(--fm);font-size:16px;font-weight:500}
+.stat span{
+  font-family:var(--fm);font-size:9.5px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim);
+}
+
+/* ---------------------------------------------------------- corridors */
+.row{
+  display:block;width:100%;text-align:left;cursor:pointer;
+  background:var(--panel);border:0;border-bottom:1px solid var(--rule);
+  padding:12px 18px;transition:background .12s;
+}
+.row:hover{background:var(--raised)}
+.row.sel{background:var(--raised);box-shadow:inset 3px 0 0 var(--live)}
+.row.pruned .rid{color:var(--dead)}
+.row-top{display:flex;align-items:baseline;gap:8px}
+.rid{
+  font-family:var(--fd);font-weight:700;font-size:15px;
+  text-transform:uppercase;letter-spacing:.05em;
+}
+.crown{color:var(--winner);font-size:11px;font-family:var(--fm)}
+.rscore{margin-left:auto;font-family:var(--fm);font-size:15px}
+.rmeta{
+  font-family:var(--fm);font-size:11px;color:var(--muted);
+  margin-top:3px;display:flex;gap:12px;flex-wrap:wrap;
+}
+
+/* the signature: score decomposition, segment width = criterion weight */
+.decomp{display:flex;gap:2px;height:9px;margin-top:9px}
+.seg{background:var(--seg-track);position:relative;overflow:hidden}
+.seg i{position:absolute;inset:0 auto 0 0;display:block;background:var(--live)}
+.row.pruned .seg i{background:var(--dead)}
+.decomp-key{
+  display:flex;gap:2px;margin-top:4px;
+  font-family:var(--fm);font-size:8.5px;letter-spacing:.07em;
+  text-transform:uppercase;color:var(--dim);
+}
+.decomp-key span{overflow:hidden;white-space:nowrap}
+
+.why{
+  margin-top:8px;padding:7px 9px;background:var(--caution-bg);
+  border-left:2px solid var(--caution);
+  font-size:12px;color:var(--caution-ink);
+}
+
+/* ---------------------------------------------------------- map + panes */
+.main{display:grid;grid-template-rows:1fr auto;min-height:0}
+#map{background:var(--void)}
+.leaflet-container{background:var(--void);font-family:var(--fb)}
+[data-theme=light] .leaflet-container{background:#E8EEF4}
+
+.drawer{
+  background:var(--panel);border-top:1px solid var(--rule);
+  display:flex;flex-direction:column;max-height:38vh;
+}
+.tabs{display:flex;gap:0;border-bottom:1px solid var(--rule)}
+.tab{
+  background:none;border:0;border-bottom:2px solid transparent;cursor:pointer;
+  padding:9px 16px;color:var(--muted);
+  font-family:var(--fm);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+}
+.tab:hover{color:var(--ink)}
+.tab[aria-selected=true]{color:var(--live);border-bottom-color:var(--live)}
+.pane{padding:14px 18px;overflow-y:auto;min-height:0}
+.pane[hidden]{display:none}
+pre{
+  margin:0;font-family:var(--fm);font-size:12px;line-height:1.65;
+  color:var(--muted);white-space:pre-wrap;
+}
+pre .k{color:var(--live)}
+pre .p{color:var(--dead)}
+.note{
+  padding:8px 0 8px 14px;border-left:2px solid var(--rule);
+  margin-bottom:9px;font-size:13px;color:var(--note-ink);
+}
+.note.flag{border-left-color:var(--caution)}
+.ovl{width:100%;border-collapse:collapse;font-family:var(--fm);font-size:12px}
+.ovl td{padding:5px 10px 5px 0;border-bottom:1px solid var(--rule);color:var(--muted)}
+.ovl td:last-child{text-align:right;color:var(--ink)}
+.ovl tr.dom td{color:var(--caution)}
+
+.adv{margin-top:16px;border-top:1px solid var(--rule);padding-top:12px}
+.adv summary{
+  cursor:pointer;list-style:none;color:var(--dim);
+  font-family:var(--fm);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+}
+.adv summary::-webkit-details-marker{display:none}
+.adv summary::before{content:'+ ';color:var(--dim)}
+.adv[open] summary::before{content:'\2212 '}
+.adv summary:hover{color:var(--muted)}
+.adv .pair{margin-top:12px}
+
+.craft{
+  display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;
+  padding:10px 0 14px;border-bottom:1px solid var(--rule);margin-bottom:14px;
+}
+.craft b{font-family:var(--fd);font-size:18px;letter-spacing:.03em}
+.craft .code{
+  font-family:var(--fm);font-size:11px;color:var(--dim);
+  border:1px solid var(--rule);padding:1px 6px;
+}
+.cov{
+  font-family:var(--fm);font-size:11.5px;color:var(--caution);
+  margin-left:auto;text-align:right;
+}
+.case{padding:11px 0;border-bottom:1px solid var(--rule)}
+.case-top{
+  display:flex;gap:10px;align-items:baseline;
+  font-family:var(--fm);font-size:11px;color:var(--muted);
+}
+.case-top b{color:var(--ink);font-size:12px}
+.prelim{color:var(--caution)}
+.case p{margin:6px 0 0;font-size:13px;color:var(--case-ink)}
+
+.beat{
+  display:grid;grid-template-columns:190px 1fr;gap:14px;
+  padding:9px 0;border-bottom:1px solid var(--rule);
+  opacity:0;transform:translateY(4px);
+  animation:beat-in .28s ease-out forwards;
+}
+@keyframes beat-in{to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){
+  .beat{animation:none;opacity:1;transform:none}
+}
+.beat-tag{
+  font-family:var(--fm);font-size:10px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--dim);padding-top:2px;
+}
+.beat-tag b{display:block;color:var(--live);font-weight:500}
+.beat.caution .beat-tag b{color:var(--caution)}
+.beat-body p{margin:0;font-size:13.5px;color:var(--ink)}
+.beat.caution .beat-body p{color:var(--caution-ink)}
+.beat-detail{
+  font-family:var(--fm);font-size:11px;color:var(--muted);margin-top:5px;
+}
+.beat-cursor{
+  display:inline-block;width:7px;height:14px;background:var(--live);
+  vertical-align:-2px;animation:blink 1s step-end infinite;
+}
+@keyframes blink{50%{opacity:0}}
+.beat-skip{
+  position:sticky;bottom:0;display:block;width:100%;margin-top:8px;
+  background:var(--raised);border:1px solid var(--rule);cursor:pointer;
+  padding:7px;color:var(--muted);
+  font-family:var(--fm);font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+}
+.beat-skip:hover{color:var(--ink);border-color:var(--live)}
+
+.empty{padding:34px 18px;color:var(--dim);font-size:13px}
+.empty b{
+  display:block;font-family:var(--fd);font-size:15px;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px;
+}
+.err{
+  margin:14px 18px;padding:11px 13px;background:var(--alarm-bg);
+  border-left:2px solid var(--alarm);color:var(--alarm-ink);font-size:13px;
+}
+
+@media(prefers-reduced-motion:reduce){
+  *{transition:none!important;animation:none!important}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <header class="masthead">
+    <h1>Corridor search</h1>
+    <div class="sub" id="routeLabel">no search yet</div>
+    <div class="spacer"></div>
+    <div class="sub" id="srcLabel"></div>
+    <div class="themer" role="group" aria-label="Map theme">
+      <button type="button" data-theme-set="dark" aria-pressed="true">Dark</button>
+      <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
+    </div>
+  </header>
+
+  <div class="body">
+    <aside class="rail">
+      <div class="block">
+        <div class="eyebrow">Your trip</div>
+        <div class="pair">
+          <label><span>From</span><input type="text" id="origin" value="KPIT" maxlength="4" autocomplete="off"></label>
+          <label><span>To</span><input type="text" id="dest" value="KBOS" maxlength="4" autocomplete="off"></label>
+          <label><span>Date</span><input type="date" id="date"></label>
+          <label><span>Time (UTC)</span><input type="time" id="time" value="13:00"></label>
+        </div>
+        <div class="toggles">
+          <label class="toggle"><input type="checkbox" id="reputation" checked>
+            Include the aircraft&rsquo;s safety record</label>
+          <label class="toggle"><input type="checkbox" id="fixtures">
+            Replay saved data instead of calling live</label>
+        </div>
+        <button class="go" id="go">Search corridors</button>
+
+        <details class="adv">
+          <summary>Search settings</summary>
+          <div class="pair">
+            <label><span>Beam width</span><input type="number" id="beam" value="2" min="1" max="6"></label>
+            <label><span>Depth</span><input type="number" id="depth" value="2" min="1" max="4"></label>
+            <label><span>Call cap</span><input type="number" id="calls" value="8" min="1" max="40"></label>
+            <label><span>Width nm</span><input type="number" id="width" value="25" min="5" max="150"></label>
+          </div>
+          <label class="toggle" style="margin-top:10px">
+            <input type="checkbox" id="graph"> Route through LangGraph</label>
+        </details>
+      </div>
+
+      <div id="verdict"></div>
+      <div id="corridors">
+        <div class="empty">
+          <b>Nothing searched yet</b>
+          Enter two airports and search. Every corridor the agent
+          considers is listed here, including the ones it rejects and why.
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div id="map"></div>
+      <section class="drawer">
+        <div class="tabs" role="tablist">
+          <button class="tab" role="tab" aria-selected="true" data-pane="agent">Agent Processing View</button>
+          <button class="tab" role="tab" aria-selected="false" data-pane="trace">Trace</button>
+          <button class="tab" role="tab" aria-selected="false" data-pane="notes">Notes</button>
+          <button class="tab" role="tab" aria-selected="false" data-pane="overlap">Overlap</button>
+          <button class="tab" role="tab" aria-selected="false" data-pane="safety">Safety record</button>
+        </div>
+        <div class="pane" id="pane-agent">
+          <div class="empty"><b>Nothing to narrate yet</b>
+            Run a search and this panel will describe, step by step, what the
+            agent did and why.</div>
+        </div>
+        <div class="pane" id="pane-trace" hidden><pre>The search trace appears here: what was generated at each depth, what survived, and what was discarded.</pre></div>
+        <div class="pane" id="pane-notes" hidden></div>
+        <div class="pane" id="pane-overlap" hidden></div>
+        <div class="pane" id="pane-safety" hidden></div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+const WEIGHTS = [
+  ['provenance', 0.40, 'PROV'],
+  ['geometry',   0.25, 'GEOM'],
+  ['agreement',  0.20, 'AGREE'],
+  ['coverage',   0.15, 'COVER'],
+];
+
+const map = L.map('map', {zoomControl:false, attributionControl:true})
+  .setView([41.4, -75.6], 6);
+L.control.zoom({position:'topright'}).addTo(map);
+
+/* CARTO basemaps: a night chart and a daytime one. */
+const TILES = {
+  dark:  'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+  light: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+};
+let tiles = null;
+
+function setTiles(theme){
+  if(tiles) map.removeLayer(tiles);
+  tiles = L.tileLayer(TILES[theme], {
+    attribution:'&copy; OpenStreetMap &copy; CARTO', subdomains:'abcd', maxZoom:18
+  }).addTo(map);
+  tiles.bringToBack();
+}
+
+/* Corridor colours are read from CSS rather than hardcoded, so the map and
+   the interface can never disagree about what "kept" looks like. */
+const cssVar = n =>
+  getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+function applyTheme(theme, redraw){
+  document.documentElement.dataset.theme = theme;
+  document.querySelectorAll('[data-theme-set]').forEach(b =>
+    b.setAttribute('aria-pressed', b.dataset.themeSet === theme));
+  try{ localStorage.setItem('corridor-theme', theme); }catch(e){}
+  setTiles(theme);
+  if(redraw && lastData) draw(lastData);
+}
+
+let layers = {};      // corridor id -> {poly, line}
+let selected = null;
+let lastData = null;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function styleFor(props, isSel){
+  const winner = props.is_winner, kept = props.kept;
+  return {
+    color: winner ? cssVar('--winner') : kept ? cssVar('--live') : cssVar('--dead'),
+    weight: isSel ? 2.5 : winner ? 2 : 1,
+    opacity: kept ? 0.95 : 0.65,
+    fillColor: winner ? cssVar('--winner') : kept ? cssVar('--live') : cssVar('--dead'),
+    fillOpacity: isSel ? 0.26 : winner ? 0.18 : kept ? 0.11 : 0.08,
+    dashArray: kept ? null : '5,5',
+  };
+}
+
+function draw(data){
+  Object.values(layers).forEach(l => { map.removeLayer(l.poly); map.removeLayer(l.line); });
+  layers = {};
+
+  const order = [...data.corridors].sort((a,b) => a.kept - b.kept || a.score - b.score);
+  const bounds = L.latLngBounds([]);
+
+  order.forEach(c => {
+    const feats = data.geojson.features.filter(f => f.properties.id === c.id);
+    const polyF = feats.find(f => f.properties.kind === 'corridor');
+    const lineF = feats.find(f => f.properties.kind === 'centerline');
+    if(!polyF) return;
+
+    const poly = L.geoJSON(polyF, {style: styleFor(c, false)}).addTo(map);
+    const line = L.geoJSON(lineF, {style:{
+      color: c.is_winner ? cssVar('--winner') : c.kept ? cssVar('--live') : cssVar('--dead'),
+      weight: c.is_winner ? 2 : 1, opacity: c.kept ? 0.9 : 0.6,
+      dashArray: c.kept ? null : '3,4',
+    }}).addTo(map);
+
+    poly.on('click', () => select(c.id));
+    poly.bindTooltip(
+      `${c.id} &middot; ${c.score.toFixed(4)} &middot; ${c.kept ? 'kept' : 'pruned'}`,
+      {sticky:true, className:'ct'});
+
+    layers[c.id] = {poly, line};
+    bounds.extend(poly.getBounds());
+  });
+
+  if(bounds.isValid()) map.fitBounds(bounds, {padding:[40,40]});
+}
+
+function select(id){
+  selected = (selected === id) ? null : id;
+  lastData.corridors.forEach(c => {
+    const l = layers[c.id];
+    if(l) l.poly.setStyle(styleFor(c, c.id === selected));
+  });
+  document.querySelectorAll('.row').forEach(r =>
+    r.classList.toggle('sel', r.dataset.id === selected));
+  if(selected && layers[selected])
+    map.fitBounds(layers[selected].poly.getBounds(), {padding:[50,50]});
+}
+
+function decomp(c){
+  const segs = WEIGHTS.map(([key, w]) =>
+    `<div class="seg" style="flex:0 0 ${w*100}%" title="${key} ${(c.components[key]??0).toFixed(2)}">
+       <i style="width:${Math.max(0,Math.min(1,c.components[key]??0))*100}%"></i></div>`).join('');
+  const keys = WEIGHTS.map(([, w, label]) =>
+    `<span style="flex:0 0 ${w*100}%">${label}</span>`).join('');
+  return `<div class="decomp">${segs}</div><div class="decomp-key">${keys}</div>`;
+}
+
+function renderCorridors(data){
+  const alt = c => {
+    if(c.altitude_min_ft == null) return '';
+    const fl = ft => 'FL' + String(Math.round(ft/100)).padStart(3,'0');
+    return c.altitude_min_ft === c.altitude_max_ft
+      ? fl(c.altitude_min_ft) : `${fl(c.altitude_min_ft)}–${fl(c.altitude_max_ft)}`;
+  };
+  $('corridors').innerHTML = [...data.corridors]
+    .sort((a,b) => b.kept - a.kept || b.score - a.score)
+    .map(c => `
+      <button class="row ${c.kept ? '' : 'pruned'}" data-id="${esc(c.id)}">
+        <div class="row-top">
+          <span class="rid">${esc(c.id)}</span>
+          ${c.is_winner ? '<span class="crown">SELECTED</span>' : ''}
+          <span class="rscore">${c.score.toFixed(4)}</span>
+        </div>
+        <div class="rmeta">
+          <span>${esc((c.provenance||'').replace(/_/g,' '))}</span>
+          ${c.length_nm ? `<span>${c.length_nm.toFixed(0)} nm</span>` : ''}
+          ${alt(c) ? `<span>${alt(c)}</span>` : ''}
+        </div>
+        ${decomp(c)}
+        ${c.reason ? `<div class="why">${esc(c.reason)}</div>` : ''}
+      </button>`).join('');
+  document.querySelectorAll('.row').forEach(r =>
+    r.addEventListener('click', () => select(r.dataset.id)));
+}
+
+function renderVerdict(data){
+  const o = data.outcome;
+  const known = o.reading !== 'unresolved';
+  $('verdict').innerHTML = `
+    <div class="verdict">
+      <div class="eyebrow">Turbulence reading</div>
+      <div class="reading ${known ? 'known' : ''}">${esc(o.reading)}</div>
+      <div class="reading-note">${known
+        ? 'Derived from observations along the selected corridor.'
+        : 'No turbulence evidence is attached yet. Unresolved is not smooth.'}</div>
+      <div class="stats">
+        <div class="stat"><b>${o.nodes_generated}</b><span>nodes</span></div>
+        <div class="stat"><b>${o.calls_used}</b><span>api calls</span></div>
+        <div class="stat"><b>${o.depth_reached}</b><span>depth</span></div>
+      </div>
+      ${o.truncated ? `<div class="why" style="margin-top:12px">Stopped on a budget
+        (${esc(o.stop)}), not on confidence. This is the best of what was explored,
+        not the best available.</div>` : ''}
+    </div>`;
+}
+
+function renderPanes(data){
+  $('pane-trace').innerHTML = '<pre>' + data.trace.map(l =>
+    l.includes('  keep ') ? `<span class="k">${esc(l)}</span>` :
+    l.includes('  prune') ? `<span class="p">${esc(l)}</span>` : esc(l)
+  ).join('\n') + '</pre>';
+
+  const flagged = t => /not smooth|absent|could not|budget|disagree|gap/i.test(t);
+  const all = [...data.notes, ...data.generator_notes];
+  $('pane-notes').innerHTML = all.length
+    ? all.map(n => `<div class="note ${flagged(n) ? 'flag' : ''}">${esc(n)}</div>`).join('')
+    : '<div class="empty">No notes were raised.</div>';
+
+  $('pane-overlap').innerHTML = data.overlaps.length ? `
+    <table class="ovl">
+      ${data.overlaps.map(o => `<tr class="${o.dominance_range ? 'dom' : ''}">
+        <td>${esc(o.a)} &nbsp;/&nbsp; ${esc(o.b)}</td>
+        <td>${o.fraction.toFixed(3)}${o.dominance_range ? ' &nbsp;dominance' : ''}</td>
+      </tr>`).join('')}
+    </table>
+    <div class="note" style="margin-top:14px">Shared airspace between corridors.
+      At 0.80 or above, the corridor with weaker provenance is discarded as
+      redundant.</div>` : '<div class="empty">No corridor pairs to compare.</div>';
+}
+
+let narrationTimer = null;
+
+function renderNarration(data){
+  const box = $('pane-agent');
+  const beats = data.narration || [];
+  if(narrationTimer){ clearTimeout(narrationTimer); narrationTimer = null; }
+
+  if(!beats.length){
+    box.innerHTML = '<div class="empty">Nothing to narrate.</div>';
+    return;
+  }
+
+  const html = b => `
+    <div class="beat ${b.kind === 'caution' ? 'caution' : ''}">
+      <div class="beat-tag"><b>${esc(b.role)}</b>${esc(b.concept)}</div>
+      <div class="beat-body">
+        <p>${esc(b.text)}</p>
+        ${b.detail ? `<div class="beat-detail">${esc(b.detail)}</div>` : ''}
+      </div>
+    </div>`;
+
+  const skip = document.createElement('button');
+  skip.className = 'beat-skip';
+  skip.textContent = 'Show all at once';
+
+  box.innerHTML = '';
+  const stream = document.createElement('div');
+  box.append(stream, skip);
+
+  let i = 0;
+  const showAll = () => {
+    if(narrationTimer){ clearTimeout(narrationTimer); narrationTimer = null; }
+    stream.innerHTML = beats.map(html).join('');
+    skip.remove();
+  };
+  skip.addEventListener('click', showAll);
+
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if(reduced){ showAll(); return; }
+
+  const step = () => {
+    if(i >= beats.length){
+      narrationTimer = null;
+      skip.remove();
+      return;
+    }
+    const b = beats[i++];
+    stream.insertAdjacentHTML('beforeend', html(b));
+    const last = stream.lastElementChild;
+    if(last) last.scrollIntoView({block:'nearest', behavior:'smooth'});
+    narrationTimer = setTimeout(step, b.pause_ms || 400);
+  };
+  step();
+}
+
+function renderSafety(data){
+  const box = $('pane-safety');
+  const craft = data.aircraft;
+  const rep = data.reputation;
+
+  if(!rep){
+    box.innerHTML = `<div class="empty"><b>Not requested</b>
+      Tick &ldquo;Include the aircraft&rsquo;s safety record&rdquo; and search again.</div>`;
+    return;
+  }
+  if(!rep.available){
+    box.innerHTML = `<div class="note flag">${esc(rep.reason)}</div>`;
+    return;
+  }
+
+  const c = rep.coverage;
+  const head = craft ? `
+    <div class="craft">
+      <b>${esc(craft.variant || craft.family || 'Unknown type')}</b>
+      <span class="code">${esc(craft.icao_designator || '')}</span>
+      ${craft.generation ? `<span class="code">${esc(craft.generation)}</span>` : ''}
+      <span class="cov">${c.cases_variant_with_text} of ${c.cases_variant}
+        cases have a written report</span>
+    </div>` : '';
+
+  const cases = rep.hits.length ? rep.hits.map(h => `
+    <div class="case">
+      <div class="case-top">
+        <b>${esc(h.ntsb_num)}</b>
+        <span>${h.event_year ?? ''}</span>
+        <span>${esc(h.operator || '')}</span>
+        <span>${esc((h.section||'').replace(/_/g,' '))}</span>
+        ${h.provisional ? '<span class="prelim">preliminary</span>' : ''}
+      </div>
+      <p>${esc(h.text)}</p>
+    </div>`).join('')
+    : '<div class="empty">No written reports matched.</div>';
+
+  box.innerHTML = head + cases +
+    rep.notes.map(n => `<div class="note flag">${esc(n)}</div>`).join('');
+}
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => {
+      const on = t === tab;
+      t.setAttribute('aria-selected', on);
+      $('pane-' + t.dataset.pane).hidden = !on;
+    });
+  });
+});
+
+async function run(){
+  const btn = $('go');
+  btn.disabled = true; btn.textContent = 'Searching…';
+  document.querySelectorAll('.err').forEach(e => e.remove());
+
+  const body = {
+    origin: $('origin').value.trim().toUpperCase(),
+    dest: $('dest').value.trim().toUpperCase(),
+    beam_width: +$('beam').value, depth_limit: +$('depth').value,
+    max_tool_calls: +$('calls').value, width_nm: +$('width').value,
+    use_graph: $('graph').checked, use_fixtures: $('fixtures').checked,
+    include_reputation: $('reputation').checked,
+  };
+  if($('date').value) body.departure_date = $('date').value;
+  if($('time').value) body.departure_time = $('time').value;
+
+  try{
+    const res = await fetch('/api/search/corridors', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)});
+    const data = await res.json();
+    if(!res.ok) throw new Error(
+      typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail));
+
+    lastData = data; selected = null;
+    $('routeLabel').textContent = `${data.request.origin} → ${data.request.dest}`;
+    const craft = data.aircraft;
+    $('srcLabel').textContent = [
+      craft && craft.variant ? `${craft.variant} (${craft.icao_designator})` : null,
+      data.request.source, `${data.outcome.elapsed_seconds}s`,
+    ].filter(Boolean).join(' · ');
+    renderVerdict(data); renderCorridors(data); renderPanes(data);
+    renderSafety(data); draw(data); renderNarration(data);
+  }catch(err){
+    const box = document.createElement('div');
+    box.className = 'err';
+    box.textContent = err.message || 'The search could not be completed.';
+    $('verdict').after(box);
+  }finally{
+    btn.disabled = false; btn.textContent = 'Search corridors';
+  }
+}
+
+document.querySelectorAll('[data-theme-set]').forEach(b =>
+  b.addEventListener('click', () => applyTheme(b.dataset.themeSet, true)));
+
+/* Saved choice wins; otherwise follow the operating system. */
+let startTheme = 'dark';
+try{ startTheme = localStorage.getItem('corridor-theme') || startTheme; }catch(e){}
+if(!(() => { try{ return localStorage.getItem('corridor-theme'); }catch(e){ return null; } })()
+   && window.matchMedia('(prefers-color-scheme: light)').matches){
+  startTheme = 'light';
+}
+applyTheme(startTheme, false);
+
+$('date').value = new Date().toISOString().slice(0,10);
+
+$('go').addEventListener('click', run);
+['origin','dest'].forEach(id => $(id).addEventListener('keydown',
+  e => { if(e.key === 'Enter') run(); }));
+</script>
+</body>
+</html>

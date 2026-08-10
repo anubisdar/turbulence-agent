@@ -89,6 +89,10 @@ class CorridorGenerator:
     origin_latlon: LatLon | None = None
     dest_latlon: LatLon | None = None
     width_nm: float = DEFAULT_WIDTH_NM
+    #: Time of day the passenger is flying, as "HH:MM" UTC. A 07:00 and a
+    #: 19:00 departure on the same route fly different air, so the reference
+    #: flight is chosen by time of day rather than simply by recency.
+    target_time: str | None = None
 
     shapes: dict[str, CorridorShape] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
@@ -172,8 +176,13 @@ class CorridorGenerator:
             self._note(f"Could not list flights on this pair: {e}")
             return None
         flown = [s for s in self._segments if s.has_flown]
-        flown.sort(key=lambda s: s.actual_off or "", reverse=True)
-        self._flight = flown[0] if flown else None
+        self._flight = _pick_reference(flown, self.target_time)
+        if self._flight and self.target_time:
+            self._note(
+                f"Reference flight {self._flight.ident} chosen for departing "
+                f"nearest {self.target_time} UTC, not for being the most "
+                f"recent. Morning and evening departures fly different air."
+            )
         if self._flight is None:
             self._note(
                 f"No flight on {self.origin}-{self.dest} has departed within "
@@ -453,6 +462,43 @@ class CorridorGenerator:
         if parent is None:
             return []
         return self._altitude_branches(parent)
+
+
+def _minutes(stamp: str | None) -> int | None:
+    """Minutes past midnight UTC from an ISO timestamp."""
+    if not stamp or "T" not in stamp:
+        return None
+    try:
+        hh, mm = stamp.split("T", 1)[1][:5].split(":")
+        return int(hh) * 60 + int(mm)
+    except (ValueError, IndexError):
+        return None
+
+
+def _pick_reference(flown: list, target_time: str | None):
+    """The flight whose corridor best represents the trip being planned.
+
+    Without a target time, the most recent departure. With one, the flight
+    departing nearest that time of day - wrapping across midnight, so 23:50
+    is twenty minutes from 00:10 rather than twenty-three hours.
+    """
+    if not flown:
+        return None
+    if not target_time:
+        return max(flown, key=lambda s: s.actual_off or "")
+
+    want = _minutes(f"T{target_time}") if ":" in target_time else None
+    if want is None:
+        return max(flown, key=lambda s: s.actual_off or "")
+
+    def distance(seg):
+        got = _minutes(seg.actual_off) or _minutes(seg.scheduled_out)
+        if got is None:
+            return 10_000
+        gap = abs(got - want)
+        return min(gap, 1440 - gap)
+
+    return min(flown, key=lambda s: (distance(s), -(_minutes(s.actual_off) or 0)))
 
 
 def cruise_band(altitudes: list[int]) -> tuple[int, int] | None:

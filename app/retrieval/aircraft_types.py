@@ -249,20 +249,25 @@ def _resolve_airbus(model: str) -> tuple[str | None, str | None, str | None, Con
     s = re.sub(r"^A-?", "A", s)
     if re.match(r"^\d{3}", s):          # bare `320`, `330-200`
         s = "A" + s
-# Marketing spellings a user would type: `A320NEO`, `A321-NEO`, `A320CEO`
+
+    # Marketing spellings a user would type: `A320NEO`, `A321-NEO`, `A320CEO`
     m = re.match(r"^A(3[1-2]\d)-?(NEO|CEO)$", s)
     if m:
         family = f"A{m.group(1)}"
         gen = m.group(2).lower()
         return family, (f"{family}neo" if gen == "neo" else None), gen, (
             Confidence.EXACT if gen == "neo" else Confidence.FAMILY_ONLY)
+
     # A300/A310 use a different scheme
     m = re.match(r"^A(30\d|310)(?:[B-F]\d)?-?(\d{3})?", s)
     if m and m.group(1) in ("300", "301", "310"):
         fam = f"A{m.group(1)}"
         return fam, fam, None, Confidence.FAMILY_ONLY
 
-    m = re.match(rf"^A(3[1-8]\d)(?:-(\d)(\d{{2}})(NX|N)?){_SUFFIX_TAGS}?$", s)
+    # Series is one digit for most families but two for the A350-1000, so
+    # the group is 1-2 digits and backtracking resolves the ambiguity:
+    # "232" splits as 2/32, "1000" as 10/00.
+    m = re.match(rf"^A(3[1-8]\d)(?:-(\d{{1,2}})(\d{{2}})(NX|N)?){_SUFFIX_TAGS}?$", s)
     if not m:
         m = re.match(r"^A(3[0-8]\d)$", s)
         if m:
@@ -511,3 +516,94 @@ def resolve(make: str, model: str) -> AircraftType:
 
     return AircraftType(manufacturer, family, variant, generation,
                         conf, make, model)
+
+
+# --------------------------------------------------------------- ICAO types
+
+#: ICAO type designators, as reported by flight-tracking data, mapped to the
+#: (make, model) strings this module already understands.
+#:
+#: This is the bridge between live flight data and the NTSB corpus. AeroAPI
+#: says `BCS3`; NTSB files an `AIRBUS CANADA LP / BD-500-1A11`. Without a
+#: mapping there is no way to ask what has happened to the aircraft a
+#: passenger is actually booked on.
+#:
+#: Deliberately limited to types in scheduled airline service. A designator
+#: that is not here resolves to UNRESOLVED rather than to something close,
+#: which is the same rule the rest of this module follows.
+ICAO_DESIGNATORS: dict[str, tuple[str, str]] = {
+    # Boeing 737
+    "B731": ("BOEING", "737-100"), "B732": ("BOEING", "737-200"),
+    "B733": ("BOEING", "737-300"), "B734": ("BOEING", "737-400"),
+    "B735": ("BOEING", "737-500"), "B736": ("BOEING", "737-600"),
+    "B737": ("BOEING", "737-700"), "B738": ("BOEING", "737-800"),
+    "B739": ("BOEING", "737-900"),
+    # 737 MAX - a different generation behind a near-identical designator
+    "B37M": ("BOEING", "737-7"), "B38M": ("BOEING", "737-8"),
+    "B39M": ("BOEING", "737-9"), "B3XM": ("BOEING", "737-10"),
+    # Boeing widebodies
+    "B741": ("BOEING", "747-100"), "B742": ("BOEING", "747-200"),
+    "B743": ("BOEING", "747-300"), "B744": ("BOEING", "747-400"),
+    "B748": ("BOEING", "747-800"),
+    "B752": ("BOEING", "757-200"), "B753": ("BOEING", "757-300"),
+    "B762": ("BOEING", "767-200"), "B763": ("BOEING", "767-300"),
+    "B764": ("BOEING", "767-400"),
+    "B772": ("BOEING", "777-200"), "B77L": ("BOEING", "777-200"),
+    "B773": ("BOEING", "777-300"), "B77W": ("BOEING", "777-300"),
+    "B788": ("BOEING", "787-8"), "B789": ("BOEING", "787-9"),
+    "B78X": ("BOEING", "787-10"),
+    "B712": ("BOEING", "717-200"),
+    # Airbus
+    "A318": ("AIRBUS", "A318-100"), "A319": ("AIRBUS", "A319-100"),
+    "A320": ("AIRBUS", "A320-200"), "A321": ("AIRBUS", "A321-200"),
+    "A19N": ("AIRBUS", "A319NEO"), "A20N": ("AIRBUS", "A320NEO"),
+    "A21N": ("AIRBUS", "A321NEO"),
+    "A306": ("AIRBUS", "A300-600"), "A310": ("AIRBUS", "A310"),
+    "A332": ("AIRBUS", "A330-200"), "A333": ("AIRBUS", "A330-300"),
+    "A338": ("AIRBUS", "A330-800"), "A339": ("AIRBUS", "A330-900"),
+    "A342": ("AIRBUS", "A340-200"), "A343": ("AIRBUS", "A340-300"),
+    "A345": ("AIRBUS", "A340-500"), "A346": ("AIRBUS", "A340-600"),
+    "A359": ("AIRBUS", "A350-900"), "A35K": ("AIRBUS", "A350-1000"),
+    "A388": ("AIRBUS", "A380-800"),
+    # A220, formerly Bombardier CSeries
+    "BCS1": ("AIRBUS CANADA LP", "BD-500-1A10"),
+    "BCS3": ("AIRBUS CANADA LP", "BD-500-1A11"),
+    # Embraer
+    "E170": ("EMBRAER", "ERJ 170-100"), "E75S": ("EMBRAER", "ERJ 170-200"),
+    "E75L": ("EMBRAER", "ERJ 170-200"), "E175": ("EMBRAER", "ERJ 170-200"),
+    "E190": ("EMBRAER", "ERJ 190-100"), "E195": ("EMBRAER", "ERJ 190-200"),
+    "E290": ("EMBRAER", "ERJ 190-300"), "E295": ("EMBRAER", "ERJ 190-400"),
+    "E135": ("EMBRAER", "EMB-135"), "E145": ("EMBRAER", "EMB-145"),
+    "E120": ("EMBRAER", "EMB-120"),
+    # Bombardier regional jets
+    "CRJ1": ("BOMBARDIER", "CL-600-2B19"), "CRJ2": ("BOMBARDIER", "CL-600-2B19"),
+    "CRJ7": ("BOMBARDIER", "CL-600-2C10"), "CRJ9": ("BOMBARDIER", "CL-600-2D24"),
+    "CRJX": ("BOMBARDIER", "CL-600-2E25"),
+    # Turboprops in scheduled service
+    "DH8A": ("DE HAVILLAND", "DHC-8-100"), "DH8B": ("DE HAVILLAND", "DHC-8-200"),
+    "DH8C": ("DE HAVILLAND", "DHC-8-300"), "DH8D": ("DE HAVILLAND", "DHC-8-400"),
+    "AT43": ("ATR", "ATR-42-300"), "AT45": ("ATR", "ATR-42-500"),
+    "AT72": ("ATR", "ATR-72-200"), "AT76": ("ATR", "ATR-72-600"),
+    "SF34": ("SAAB", "SAAB 340B"), "B190": ("BEECH", "1900D"),
+    # McDonnell Douglas
+    "MD82": ("MCDONNELL DOUGLAS", "MD-82"), "MD83": ("MCDONNELL DOUGLAS", "MD-83"),
+    "MD87": ("MCDONNELL DOUGLAS", "MD-87"), "MD88": ("MCDONNELL DOUGLAS", "MD-88"),
+    "MD90": ("MCDONNELL DOUGLAS", "MD-90"), "MD11": ("MCDONNELL DOUGLAS", "MD-11"),
+    "DC93": ("MCDONNELL DOUGLAS", "DC-9-30"),
+    "DC10": ("MCDONNELL DOUGLAS", "DC-10"),
+}
+
+
+def resolve_icao(designator: str) -> AircraftType:
+    """Resolve an ICAO type designator such as `B38M` or `BCS3`.
+
+    Unknown designators return UNRESOLVED. Guessing from a prefix would be
+    worse than useless here: `B738` and `B38M` differ by one character and
+    are twenty years apart in certification.
+    """
+    key = (designator or "").strip().upper()
+    pair = ICAO_DESIGNATORS.get(key)
+    if pair is None:
+        return AircraftType(None, None, None, None, Confidence.UNRESOLVED,
+                            designator or "", designator or "")
+    return resolve(*pair)
