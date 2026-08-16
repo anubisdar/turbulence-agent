@@ -147,6 +147,18 @@ body{transition:background .18s,color .18s}
 }
 .reading.known{color:var(--live)}
 .reading-note{color:var(--muted);font-size:12.5px;margin-top:4px}
+.explain{
+  padding:12px 14px;margin-top:12px;background:var(--raised);
+  border-left:2px solid var(--live);font-size:13.5px;line-height:1.55;
+  color:var(--ink);
+}
+.explain.plain{border-left-color:var(--dim)}
+.explain-tag{
+  display:block;margin-top:9px;font-family:var(--fm);font-size:9.5px;
+  letter-spacing:.11em;text-transform:uppercase;color:var(--dim);
+}
+.explain-tag.model{color:var(--live)}
+
 .sources{
   display:flex;gap:1px;background:var(--rule);
   border:1px solid var(--rule);margin-top:12px;
@@ -365,6 +377,8 @@ pre .p{color:var(--dead)}
             Look up turbulence along the route</label>
           <label class="toggle"><input type="checkbox" id="reputation" checked>
             Include the aircraft&rsquo;s safety record</label>
+          <label class="toggle"><input type="checkbox" id="explanation">
+            Have a model write the explanation</label>
           <label class="toggle"><input type="checkbox" id="fixtures">
             Replay saved data instead of calling live</label>
         </div>
@@ -588,16 +602,31 @@ function renderVerdict(data){
         Both are shown and the worse one is used, because an average would
         match neither report.</div>` : ''}` : '';
 
+  const ex = data.explanation || {};
+  const written = ex.source === 'model';
+  // The reading-note already carries the deterministic summary, so the
+  // block only appears when the model produced something different.
+  const explainBlock = (written && ex.text) ? `
+      <div class="explain${written ? '' : ' plain'}">
+        ${esc(ex.text)}
+        <span class="explain-tag model">written by ${
+          esc(ex.model || 'a model')}</span>
+      </div>` : '';
+
   $('verdict').innerHTML = `
     <div class="verdict">
       <div class="eyebrow">Turbulence reading</div>
       <div class="reading ${known ? 'known' : ''}">${esc(o.reading)}</div>
       <div class="reading-note">${
         off ? 'Turbulence lookup was switched off for this search.'
+        : written ? (wx.disagree
+            ? 'The worse of two disagreeing sources along the selected corridor.'
+            : 'From pilot reports and forecasts along the selected corridor.')
         : known ? esc(wx.summary
             || 'From pilot reports and forecasts along the selected corridor.')
         : esc(wx.summary || 'Nothing was found along this corridor.')
           + ' Unresolved is not smooth.'}</div>
+      ${explainBlock}
       ${sources}
       <div class="stats">
         <div class="stat"><b>${o.nodes_generated}</b><span>nodes</span></div>
@@ -754,6 +783,7 @@ async function run(){
     use_graph: $('graph').checked, use_fixtures: $('fixtures').checked,
     include_reputation: $('reputation').checked,
     include_turbulence: $('turbulence').checked,
+    include_explanation: $('explanation').checked,
   };
   if($('date').value) body.departure_date = $('date').value;
   if($('time').value) body.departure_time = $('time').value;

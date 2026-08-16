@@ -350,6 +350,27 @@ def narrate(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "that rather than leaving the panel silently empty.",
             rep.get("reason"), kind="caution", pause=BEAT))
 
+    # ---------------------------------------------------------- explainer
+    ex = payload.get("explanation") or {}
+    if ex.get("enabled"):
+        if ex.get("source") == "model":
+            beats.append(_beat(
+                STATE, "Explanation",
+                "A language model wrote the paragraph you are reading. It was "
+                "given the finished numbers and allowed only to restate them, "
+                "then checked: an explanation that invented a severity, "
+                "reassured, or hid a caveat would have been discarded.",
+                f"accepted · {ex.get('model')}", pause=BEAT))
+        elif ex.get("rejected"):
+            beats.append(_beat(
+                CRITIC, "Guardrail",
+                "The model's explanation was discarded and the plain summary "
+                "used instead. The written version is an improvement on the "
+                "wording, never a substitute for the evidence, so a failed "
+                "check costs prose rather than accuracy.",
+                "; ".join(str(r) for r in ex["rejected"][:2]),
+                kind="caution", pause=BEAT_LONG))
+
     beats.append(_beat(
         CONTROLLER, "Summary",
         f"Done. {len(corridors)} corridors considered, "

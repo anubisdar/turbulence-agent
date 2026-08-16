@@ -1,0 +1,285 @@
+# install-to: app/reasoning
+"""
+The explainer: the one place a language model talks to the passenger.
+
+Everything upstream of this module is deterministic. Corridors are scored by
+arithmetic, pruning is a rule, and severity comes from pilot reports and
+forecast polygons. This module takes that finished result and writes the
+paragraph a nervous flier actually reads.
+
+It is the last step on purpose. A wrong sentence here degrades an
+explanation; a wrong number anywhere upstream corrupts a score. That is the
+whole reason the model sits at the edge rather than inside the loop.
+
+FOUR RULES, EACH ENFORCED RATHER THAN REQUESTED
+
+  IT MAY NOT INVENT A SEVERITY. The reading comes from the critic. The
+  explainer states it. Output naming a severity the evidence does not hold
+  is rejected, not repaired.
+
+  IT MAY NOT SOFTEN. No "probably fine", no "should be smooth", no
+  reassurance. Thin evidence is the case where comfort language is most
+  tempting and least earned, and it is the case this agent exists to
+  handle.
+
+  IT MUST CARRY THE UNCERTAINTY. If coverage is a fifth of the route, the
+  paragraph says so. If two corridors disagree, it says both. Fluent prose
+  is exactly how a caveat gets smoothed away, so the caveats are checked
+  for rather than hoped for.
+
+  IT FAILS TO THE DETERMINISTIC SUMMARY. If the model is unavailable, slow,
+  or produces something that fails validation, the reader gets the existing
+  `evidence.summary` instead. This makes the explainer an enhancement, not
+  a dependency: an outage degrades the prose, never the answer.
+
+The client is injectable, so the whole module tests offline against a fake.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from dataclasses import dataclass, field
+from typing import Any, Callable, Protocol
+
+from app.reasoning.critic import Severity
+
+DEFAULT_MODEL = os.environ.get("TURBULENCE_EXPLAINER_MODEL",
+                               "claude-sonnet-5")
+DEFAULT_MAX_TOKENS = 400
+DEFAULT_TIMEOUT_SECONDS = 20.0
+
+#: Words that promise comfort. The model is told not to use them and the
+#: output is checked afterwards, because a rule only in a prompt is a
+#: request rather than a constraint.
+SOFTENING = (
+    "probably fine", "should be fine", "should be smooth", "nothing to worry",
+    "no need to worry", "don't worry", "do not worry", "rest easy",
+    "you'll be fine", "you will be fine", "perfectly safe", "quite safe",
+    "very safe", "no cause for concern", "not a concern", "sit back and relax",
+    "smooth sailing", "clear skies", "expect a comfortable", "should be okay",
+    "should be ok", "reassur",
+)
+
+#: Severity words the model must not use unless the evidence holds them.
+SEVERITY_WORDS = {
+    "smooth": Severity.SMOOTH,
+    "light": Severity.LIGHT,
+    "moderate": Severity.MODERATE,
+    "severe": Severity.SEVERE,
+    "extreme": Severity.EXTREME,
+}
+
+SYSTEM_PROMPT = """\
+You write one short paragraph for an anxious air passenger, explaining what \
+a turbulence assessment found.
+
+You are given structured facts. You may only restate them. You may not add \
+weather knowledge, aviation knowledge, or any judgement of your own.
+
+Hard rules:
+1. State only the severity level given to you. Never name a different level, \
+and never say a level is likely, expected, or possible unless the facts say so.
+2. Never reassure. Do not write that the flight will be fine, smooth, safe, \
+comfortable, or nothing to worry about. You are describing evidence, not \
+predicting an experience.
+3. Always carry the uncertainty. If coverage is thin, say so. If sources \
+disagree, say both. If nothing is known, say that plainly and do not fill \
+the gap.
+4. Write 3 to 5 sentences of plain prose. No lists, no headings, no bold. \
+Address the reader as "you". Do not open with a greeting.
+
+If the facts say the reading is unresolved, your paragraph must make clear \
+that nothing is known about the air on this route, and that this is not the \
+same as the air being calm."""
+
+
+class ModelClient(Protocol):
+    """Anything that turns a prompt into text."""
+
+    def complete(self, system: str, user: str) -> str: ...
+
+
+@dataclass
+class AnthropicClient:
+    """Real client. Imported lazily so this module loads without the SDK."""
+    api_key: str | None = None
+    model: str = DEFAULT_MODEL
+    max_tokens: int = DEFAULT_MAX_TOKENS
+    timeout: float = DEFAULT_TIMEOUT_SECONDS
+    _client: Any = field(default=None, repr=False)
+
+    def _load(self):
+        if self._client is None:
+            import anthropic
+            key = self.api_key or os.environ.get("ANTHROPIC_API_KEY")
+            if not key:
+                raise RuntimeError("ANTHROPIC_API_KEY is not set")
+            self._client = anthropic.Anthropic(api_key=key,
+                                               timeout=self.timeout)
+        return self._client
+
+    def complete(self, system: str, user: str) -> str:
+        message = self._load().messages.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        return "".join(block.text for block in message.content
+                       if getattr(block, "type", None) == "text").strip()
+
+
+# ------------------------------------------------------------------ facts
+
+
+def build_facts(payload: dict[str, Any]) -> dict[str, Any]:
+    """The structured facts the model is allowed to restate.
+
+    Deliberately narrow. Anything not in here cannot appear in the output
+    without failing validation, which is easier to enforce than trusting a
+    prompt to constrain scope.
+    """
+    outcome = payload.get("outcome") or {}
+    wx = outcome.get("turbulence") or {}
+    observed = wx.get("observed") or {}
+    forecast = wx.get("forecast") or {}
+    request = payload.get("request") or {}
+    aircraft = payload.get("aircraft") or {}
+
+    kept = [c for c in payload.get("corridors") or [] if c.get("kept")]
+    winner = next((c for c in kept if c.get("is_winner")), None)
+
+    facts: dict[str, Any] = {
+        "route": f"{request.get('origin')} to {request.get('dest')}",
+        "reading": wx.get("reading") or outcome.get("reading"),
+        "pilot_reports": {
+            "reading": observed.get("reading"),
+            "count": observed.get("count", 0),
+            "average_age_minutes": observed.get("mean_age_minutes"),
+        },
+        "forecast": {
+            "reading": forecast.get("reading"),
+            "count": forecast.get("count", 0),
+        },
+        "sources_disagree": bool(wx.get("disagree")),
+        "route_coverage_fraction": wx.get("coverage_fraction"),
+        "corridors_considered": len(payload.get("corridors") or []),
+        "corridors_kept": len(kept),
+        "search_was_truncated": bool(outcome.get("truncated")),
+        "plain_summary": wx.get("summary"),
+    }
+    if aircraft.get("variant"):
+        facts["aircraft"] = aircraft["variant"]
+    if winner and winner.get("altitude_min_ft"):
+        facts["cruise_band"] = (
+            f"FL{winner['altitude_min_ft'] // 100:03d} to "
+            f"FL{(winner.get('altitude_max_ft') or 0) // 100:03d}")
+    return facts
+
+
+# ------------------------------------------------------------------ checks
+
+
+@dataclass
+class Verdict:
+    """Whether a candidate explanation may be shown."""
+    ok: bool
+    reasons: list[str] = field(default_factory=list)
+
+
+def validate(text: str, facts: dict[str, Any]) -> Verdict:
+    """Check the output against the four rules.
+
+    Rejection is the outcome, not repair. Editing a model's paragraph to
+    remove a reassurance would leave the sentence around it built on the
+    same assumption.
+    """
+    reasons: list[str] = []
+    if not text or len(text.split()) < 15:
+        return Verdict(False, ["the explanation is empty or too short"])
+    if len(text.split()) > 220:
+        reasons.append("the explanation is far longer than asked for")
+
+    low = text.lower()
+
+    for phrase in SOFTENING:
+        if phrase in low:
+            reasons.append(f"contains reassurance: {phrase!r}")
+
+    allowed = {str(facts.get("reading") or "").lower(),
+               str((facts.get("pilot_reports") or {}).get("reading") or "").lower(),
+               str((facts.get("forecast") or {}).get("reading") or "").lower()}
+    allowed.discard("")
+    allowed.discard("unresolved")
+    for word in SEVERITY_WORDS:
+        if re.search(rf"\b{word}\b", low) and word not in allowed:
+            # "not smooth" is the project's own phrasing and is not a claim
+            # that the air is smooth.
+            if word == "smooth" and re.search(r"not smooth|isn.t smooth", low):
+                continue
+            reasons.append(f"names a severity the evidence does not hold: "
+                           f"{word!r}")
+
+    if str(facts.get("reading")).lower() == "unresolved":
+        if not re.search(r"not known|nothing is known|no .*(report|forecast)"
+                         r"|unknown|not the same as", low):
+            reasons.append("does not make clear that nothing is known")
+
+    if facts.get("sources_disagree") and "disagree" not in low:
+        reasons.append("does not mention that the sources disagree")
+
+    coverage = facts.get("route_coverage_fraction")
+    if isinstance(coverage, (int, float)) and 0 < coverage < 0.34:
+        if not re.search(r"cover|only part|much of the route|most of the route",
+                         low):
+            reasons.append("does not mention how little of the route is covered")
+
+    return Verdict(not reasons, reasons)
+
+
+# ------------------------------------------------------------------ agent
+
+
+@dataclass
+class Explanation:
+    text: str
+    source: str                 # "model" or "deterministic"
+    model: str | None = None
+    rejected: list[str] = field(default_factory=list)
+    facts: dict[str, Any] = field(default_factory=dict)
+
+
+def explain(payload: dict[str, Any], client: ModelClient | None = None,
+            model_name: str | None = None) -> Explanation:
+    """Write the passenger-facing paragraph, or fall back to the plain one.
+
+    The fallback is not an error path. A search whose model call failed
+    still has a complete, honest answer, because the deterministic summary
+    was always going to be there.
+    """
+    facts = build_facts(payload)
+    fallback = (facts.get("plain_summary")
+                or "No turbulence assessment is available for this route.")
+
+    if client is None:
+        return Explanation(text=fallback, source="deterministic", facts=facts)
+
+    user = ("Facts about this turbulence assessment:\n\n"
+            + json.dumps(facts, indent=2)
+            + "\n\nWrite the paragraph.")
+
+    try:
+        text = client.complete(SYSTEM_PROMPT, user)
+    except Exception as e:  # noqa: BLE001 - an outage degrades prose, not truth
+        return Explanation(text=fallback, source="deterministic", facts=facts,
+                           rejected=[f"model call failed: {type(e).__name__}"])
+
+    verdict = validate(text, facts)
+    if not verdict.ok:
+        return Explanation(text=fallback, source="deterministic", facts=facts,
+                           rejected=verdict.reasons)
+
+    return Explanation(text=text.strip(), source="model",
+                       model=model_name or DEFAULT_MODEL, facts=facts)

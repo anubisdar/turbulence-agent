@@ -587,3 +587,80 @@ class TestNarrationCoversAnEmptySearch:
                 low = b["text"].lower()
                 assert "smooth" not in low or "not smooth" in low
                 assert "calm" not in low
+
+
+class TestExplainerToggle:
+    """The written explanation is an enhancement. Off by default, and its
+    absence never costs accuracy."""
+
+    def test_off_by_default(self, client):
+        data = do_search(client)
+        assert data["request"]["include_explanation"] is False
+        assert data["explanation"]["enabled"] is False
+        assert data["explanation"]["source"] == "deterministic"
+
+    def test_the_deterministic_text_is_always_present(self, client):
+        for flag in (True, False):
+            ex = do_search(client, include_explanation=flag)["explanation"]
+            assert ex["text"], "there must always be something to read"
+
+    def test_a_missing_key_is_explained_not_silent(self, client, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        ex = do_search(client, include_explanation=True)["explanation"]
+        assert ex["source"] == "deterministic"
+        assert any("ANTHROPIC_API_KEY" in str(r) for r in ex["rejected"])
+
+    def test_the_response_says_which_path_produced_the_text(self, client):
+        ex = do_search(client)["explanation"]
+        assert ex["source"] in ("model", "deterministic")
+
+    def test_the_flag_is_echoed_back(self, client):
+        assert do_search(client, include_explanation=True)[
+            "request"]["include_explanation"] is True
+
+
+class TestExplainerNarration:
+    def _payload(self, explanation):
+        return {
+            "request": {"origin": "KIAD", "dest": "KLAX", "beam_width": 2,
+                        "depth_limit": 2, "max_tool_calls": 8},
+            "outcome": {"stop": "depth_limit", "nodes_generated": 8,
+                        "calls_used": 8, "depth_reached": 2,
+                        "winner": "track/high", "reading": "moderate",
+                        "elapsed_seconds": 15.0,
+                        "turbulence": {
+                            "available": True, "reading": "moderate",
+                            "observed": {"reading": "unresolved", "count": 0},
+                            "forecast": {"reading": "moderate", "count": 1},
+                            "disagree": False, "coverage_fraction": 0.0}},
+            "corridors": [], "overlaps": [],
+            "fix_cache": {"before": 27, "after": 27, "by_type": {}},
+            "explanation": explanation,
+        }
+
+    def test_an_accepted_explanation_says_it_was_checked(self):
+        from app.web.narrate import narrate
+        beats = narrate(self._payload({
+            "enabled": True, "source": "model", "model": "claude-sonnet-5",
+            "rejected": []}))
+        text = " ".join(b["text"] for b in beats)
+        assert "allowed only to restate them" in text
+        assert "would have been discarded" in text
+
+    def test_a_rejected_explanation_is_shown_as_a_guardrail(self):
+        """The guardrail firing is more interesting than it never firing."""
+        from app.web.narrate import narrate
+        beats = narrate(self._payload({
+            "enabled": True, "source": "deterministic",
+            "rejected": ["contains reassurance: 'should be fine'"]}))
+        flagged = [b for b in beats if b["kind"] == "caution"
+                   and "discarded" in b["text"]]
+        assert flagged
+        assert "reassurance" in str(flagged[0]["detail"])
+
+    def test_nothing_is_narrated_when_the_toggle_is_off(self):
+        from app.web.narrate import narrate
+        beats = narrate(self._payload({"enabled": False,
+                                       "source": "deterministic",
+                                       "rejected": []}))
+        assert not [b for b in beats if b["concept"] == "Explanation"]

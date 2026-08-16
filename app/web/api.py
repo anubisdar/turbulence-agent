@@ -101,6 +101,11 @@ class CorridorSearchBody(BaseModel):
         True, description="Gather pilot reports and turbulence forecasts "
                           "along the surviving corridors. Switching this off "
                           "leaves every reading unresolved.")
+    include_explanation: bool = Field(
+        False, description="Have a language model write the passenger-facing "
+                           "paragraph. Falls back to the deterministic "
+                           "summary if it is unavailable or its output fails "
+                           "validation.")
 
     def to_request(self) -> SearchRequest:
         return SearchRequest(
@@ -113,6 +118,7 @@ class CorridorSearchBody(BaseModel):
             departure_time=self.departure_time,
             include_reputation=self.include_reputation,
             include_turbulence=self.include_turbulence,
+            include_explanation=self.include_explanation,
         )
 
 

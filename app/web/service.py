@@ -24,6 +24,7 @@ real data, just not fetched live.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from itertools import combinations
@@ -173,6 +174,9 @@ class SearchRequest:
     #: On by default. Turning it off leaves every reading unresolved, which
     #: is honest but is not what the agent is for.
     include_turbulence: bool = True
+    #: Off by default. The deterministic summary is already a complete
+    #: answer; the model only rewrites it into something more readable.
+    include_explanation: bool = False
 
 
 def _build_client(req: SearchRequest, api_key: str | None
@@ -273,6 +277,41 @@ def _corridor_meta(result: SearchResult,
                     "mean_age_minutes": evidence.mean_age_minutes,
                 })
     return meta
+
+
+def _explain(payload: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    """Ask the model for a passenger-facing paragraph, or keep the plain one.
+
+    The explainer is an enhancement rather than a dependency. No key, no
+    SDK, a timeout, or an output that fails validation all leave the reader
+    with the deterministic summary that was always going to be there.
+    """
+    from app.reasoning.explainer import DEFAULT_MODEL, explain
+
+    if not enabled:
+        out = explain(payload, client=None)
+        return {"text": out.text, "source": out.source, "model": None,
+                "rejected": [], "enabled": False}
+
+    client = None
+    note = None
+    try:
+        from app.reasoning.explainer import AnthropicClient
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            note = ("ANTHROPIC_API_KEY is not set, so the plain summary was "
+                    "used instead of a written explanation.")
+        else:
+            client = AnthropicClient()
+    except Exception as e:  # noqa: BLE001
+        note = (f"The explainer could not be constructed "
+                f"({type(e).__name__}), so the plain summary was used.")
+
+    out = explain(payload, client=client, model_name=DEFAULT_MODEL)
+    rejected = list(out.rejected)
+    if note:
+        rejected.append(note)
+    return {"text": out.text, "source": out.source, "model": out.model,
+            "rejected": rejected, "enabled": True}
 
 
 def _turbulence_summary(result: SearchResult, generator) -> dict[str, Any]:
@@ -385,6 +424,7 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
                 "departure_time": req.departure_time,
                 "include_reputation": req.include_reputation,
                 "include_turbulence": req.include_turbulence,
+                "include_explanation": req.include_explanation,
             },
             "aircraft": aircraft,
             "reputation": reputation,
@@ -417,6 +457,10 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
             },
             "call_log": list(client.call_log),
         }
+        # The explainer reads the finished payload, so it can only restate
+        # what the search already established.
+        payload["explanation"] = _explain(payload, req.include_explanation)
+
         # Narration is derived from the finished payload, so it can describe
         # what happened but never influence it.
         from app.web.narrate import narrate
