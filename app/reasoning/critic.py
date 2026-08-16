@@ -127,16 +127,55 @@ class Geometry:
 
 @dataclass(frozen=True)
 class Evidence:
-    """Turbulence observation gathered along a corridor.
+    """Turbulence evidence gathered along a corridor.
 
     `coverage_fraction` and `agreement` are None when nothing has been
     gathered yet - distinct from 0.0, which means gathered and empty.
+
+    OBSERVED AND FORECAST ARE HELD APART. A pilot report is one aircraft at
+    one moment saying what the ride was actually like. A forecast polygon
+    covers hours and a wide band of sky saying what is expected. They can
+    disagree, and conflicts surface rather than average, so each keeps its
+    own reading and its own count all the way to the critic. `agreement` is
+    then something the critic computes from the two rather than a blended
+    number handed to it.
+
+    `reading` is the corridor's single severity, taken as the worse of the
+    two. That is the conservative direction and the one a nervous passenger
+    cares about: a lone severe report is the thing to surface, not the thing
+    to outvote.
     """
     coverage_fraction: float | None = None   # 0..1 of corridor with any obs
     mean_age_minutes: float | None = None
-    agreement: float | None = None           # 0..1 PIREP vs forecast
+    agreement: float | None = None           # 0..1, computed from the two
     reading: Severity = Severity.UNRESOLVED
     observation_count: int = 0
+
+    # --- observed: pilot reports
+    observed_reading: Severity = Severity.UNRESOLVED
+    observed_count: int = 0
+    observed_worst_at: str | None = None      # where the worst report came from
+
+    # --- forecast: G-AIRMET polygons
+    forecast_reading: Severity = Severity.UNRESOLVED
+    forecast_count: int = 0
+
+    @property
+    def has_observed(self) -> bool:
+        return self.observed_reading is not Severity.UNRESOLVED
+
+    @property
+    def has_forecast(self) -> bool:
+        return self.forecast_reading is not Severity.UNRESOLVED
+
+    @property
+    def sources_disagree(self) -> bool:
+        """True only when both sources spoke and said different things.
+
+        One source being silent is not a disagreement, it is a gap.
+        """
+        return (self.has_observed and self.has_forecast
+                and self.observed_reading is not self.forecast_reading)
 
 
 @dataclass(frozen=True)
@@ -198,11 +237,29 @@ def score_geometry(c: Corridor) -> float:
     return round(0.7 * length_term + 0.3 * dogleg_term, 4)
 
 
+#: How far apart two severity levels can be before agreement scores zero.
+#: Light against moderate is a mild disagreement; light against severe is a
+#: real one.
+_MAX_SEVERITY_GAP = 4
+
+
 def score_agreement(c: Corridor) -> float:
-    """Absent evidence scores neutral, not good and not bad. Scoring it zero
-    would let a lack of observation act like disagreement."""
-    a = c.evidence.agreement
-    return 0.5 if a is None else max(0.0, min(1.0, a))
+    """Do the observed and forecast readings point the same way?
+
+    Computed here rather than supplied, so the critic sees the two sources
+    as separate opinions instead of a pre-blended number.
+
+    Absent evidence scores neutral, not zero. One silent source is a gap,
+    and scoring a gap as disagreement would punish a corridor for what
+    nobody reported on it.
+    """
+    e = c.evidence
+    if not (e.has_observed and e.has_forecast):
+        return 0.5 if e.agreement is None else max(0.0, min(1.0, e.agreement))
+
+    gap = abs(SEVERITY_ORDER.get(e.observed_reading, 0)
+              - SEVERITY_ORDER.get(e.forecast_reading, 0))
+    return round(max(0.0, 1.0 - gap / _MAX_SEVERITY_GAP), 4)
 
 
 def score_coverage(c: Corridor) -> float:

@@ -273,6 +273,27 @@ def overlap_fraction(a: CorridorShape, b: CorridorShape) -> float:
     return round(min(1.0, inter / smaller), 4)
 
 
+def intersects_ring(shape: CorridorShape,
+                    ring: list[tuple[float, float]]) -> bool:
+    """Does an advisory polygon touch this corridor at all?
+
+    Testing whether the ring's vertices fall inside the corridor is not
+    enough: a G-AIRMET is typically far larger than a 25 nm corridor, so a
+    polygon that completely contains the route has every vertex outside it.
+    Real intersection is the only test that catches both cases.
+    """
+    if len(ring) < 3 or shape.polygon is None:
+        return False
+    local = [shape.to_local(lat, lon) for lat, lon in ring]
+    try:
+        advisory = Polygon(local)
+        if not advisory.is_valid:
+            advisory = advisory.buffer(0)      # repair self-intersections
+        return shape.polygon.intersects(advisory)
+    except (ValueError, TypeError):
+        return False
+
+
 def corridor_overlap_fn(shapes: dict[str, CorridorShape]):
     """Adapter for the critic's `overlap_fn` slot.
 
