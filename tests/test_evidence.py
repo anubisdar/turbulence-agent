@@ -126,11 +126,19 @@ class TestObservedGathering:
         assert any("not a report of smooth air" in n for n in notes)
 
     def test_no_reports_at_all(self, shape):
-        reading, count, age, cov, _, _, _ = gather_observed(shape, [], NOW)
+        reading, count, age, cov, notes, _, _ = gather_observed(shape, [], NOW)
         assert reading is Severity.UNRESOLVED
         assert count == 0
         assert cov == 0.0
         assert age is None
+
+    def test_fetching_nothing_is_still_said_out_loud(self, shape):
+        """The one place absence could pass without comment. An empty fetch
+        used to produce no note at all, which is the failure this project
+        exists to avoid."""
+        _, _, _, _, notes, _, _ = gather_observed(shape, [], NOW)
+        assert notes, "an empty fetch must still be explained"
+        assert any("not a report of smooth air" in n for n in notes)
 
     def test_mean_age_is_computed(self, shape):
         reports = [FakeReport(PATH[6], 34000, "light", age_minutes=10),
@@ -319,14 +327,241 @@ class TestFailureIsNotSmooth:
 
 
 class TestBoundingBox:
+    """AWC wants (min_lat, min_lon, max_lat, max_lon). Getting the order
+    wrong is silent: a Pittsburgh longitude of -80 is a legal latitude, so
+    the request succeeds and searches the South Atlantic, returning zero
+    reports that look exactly like a calm afternoon."""
+
     def test_the_box_contains_the_route(self, shape):
-        min_lon, min_lat, max_lon, max_lat = bounding_box(shape)
+        min_lat, min_lon, max_lat, max_lon = bounding_box(shape)
         for lat, lon in PATH:
             assert min_lat <= lat <= max_lat
             assert min_lon <= lon <= max_lon
 
+    def test_latitude_comes_first(self, shape):
+        """The check that would have caught the original defect."""
+        min_lat, min_lon, max_lat, max_lon = bounding_box(shape)
+        assert -90 <= min_lat <= 90 and -90 <= max_lat <= 90
+        assert 35 < min_lat < 45, "first value should be a KPIT-KBOS latitude"
+        assert -90 < min_lon < -60, "second value should be a longitude"
+
+    def test_the_box_lands_over_the_northeast_united_states(self, shape):
+        """A transposed box would land in the South Atlantic and return
+        nothing, which is indistinguishable from calm air."""
+        min_lat, min_lon, max_lat, max_lon = bounding_box(shape)
+        assert min_lat > 0, "northern hemisphere"
+        assert max_lon < 0, "western hemisphere"
+
     def test_the_box_is_padded(self, shape):
-        min_lon, min_lat, max_lon, max_lat = bounding_box(shape, pad_deg=1.0)
+        min_lat, min_lon, max_lat, max_lon = bounding_box(shape, pad_deg=1.0)
         lats = [p[0] for p in PATH]
         assert min_lat < min(lats)
         assert max_lat > max(lats)
+
+
+class TestPlainLanguageAbsence:
+    """"Unresolved" is accurate and useless on its own. A passenger needs to
+    know whether nobody looked or people looked and found nothing."""
+
+    @pytest.fixture
+    def short_route(self):
+        return build_corridor(great_circle(KPIT, KBOS, 24))
+
+    @pytest.fixture
+    def long_route(self):
+        return build_corridor(great_circle((38.9445, -77.4558),
+                                           (33.9425, -118.4081), 24))
+
+    def test_a_short_route_says_so(self, short_route):
+        from app.reasoning.evidence import explain_absence
+        text = explain_absence(short_route, 21, 0, 1, 0)
+        assert "short hop" in text
+        assert "431" in text or "43" in text
+        assert "common on routes this length" in text
+
+    def test_a_long_route_does_not_claim_it_is_short(self, long_route):
+        from app.reasoning.evidence import explain_absence
+        text = explain_absence(long_route, 40, 0, 3, 0)
+        assert "short hop" not in text
+
+    def test_nothing_fetched_is_distinguished_from_nothing_found(
+            self, short_route):
+        from app.reasoning.evidence import explain_absence
+        nothing_fetched = explain_absence(short_route, 0, 0, 0, 0)
+        nothing_found = explain_absence(short_route, 21, 0, 1, 0)
+        assert nothing_fetched != nothing_found
+        assert "were not available" in nothing_fetched or \
+               "Neither pilot reports nor forecasts were available" in nothing_fetched
+
+    def test_one_source_speaking_is_described_as_such(self, long_route):
+        from app.reasoning.evidence import explain_absence
+        text = explain_absence(long_route, 12, 0, 3, 1)
+        assert "only thing to go on" in text
+
+    def test_no_explanation_ever_implies_calm(self, short_route):
+        from app.reasoning.evidence import explain_absence
+        for args in [(0, 0, 0, 0), (21, 0, 1, 0), (12, 0, 3, 1)]:
+            text = explain_absence(short_route, *args).lower()
+            assert "smooth" not in text
+            assert "calm" not in text
+            assert "clear" not in text
+
+    def test_the_summary_reaches_the_result(self, shape):
+        res = gather_evidence(shape, fetch_pireps=lambda b, h: [],
+                              gairmet_client=None, when=NOW)
+        assert res.summary
+        assert res.evidence.reading is Severity.UNRESOLVED
+
+    def test_a_resolved_reading_explains_rather_than_excuses(self, shape):
+        from app.sources.gairmet import GairmetClient
+        client = GairmetClient(transport=lambda p, q: (200, [{
+            "hazard": "TURB-HI", "severity": "MOD", "base": "300",
+            "top": "400", "validTime": "2026-08-16T12:00:00.000Z",
+            "expireTime": 1786892400,
+            "coords": [{"lat": str(lat), "lon": str(lon)}
+                       for lat, lon in wide_ring()]}], ""))
+        res = gather_evidence(shape, gairmet_client=client, when=NOW)
+        assert res.evidence.reading is not Severity.UNRESOLVED
+        # A resolved reading gets an explanation of what it means and where
+        # it came from, not an excuse for having nothing.
+        assert res.summary
+        assert "Nothing is known" not in res.summary
+        assert "short hop" not in res.summary
+
+
+class TestRejectionReasonsAreDistinguished:
+    """Somewhere else entirely and directly overhead at 3,000 feet are
+    different facts, and only one is worth worrying about."""
+
+    def test_low_level_reports_along_the_route_are_named_as_such(self, shape):
+        reports = [FakeReport(PATH[i], 3000, "light") for i in (4, 8, 12, 16)]
+        _, _, _, _, notes, inside, _ = gather_observed(shape, reports, NOW)
+        assert inside == 0
+        text = " ".join(notes)
+        assert "along this route" in text
+        assert "under the cruise altitude" in text
+
+    def test_distant_reports_are_counted_separately(self, shape):
+        reports = [FakeReport(PATH[8], 3000, "light"),
+                   FakeReport((25.76, -80.19), 34000, "severe")]
+        _, _, _, _, notes, _, _ = gather_observed(shape, reports, NOW)
+        text = " ".join(notes)
+        assert "surrounding airspace" in text
+
+    def test_the_closing_note_never_implies_smooth(self, shape):
+        reports = [FakeReport(PATH[8], 3000, "light")]
+        _, _, _, _, notes, _, _ = gather_observed(shape, reports, NOW)
+        assert any("not a report of smooth air" in n for n in notes)
+
+
+class TestReadingExplanations:
+    """A resolved reading needs plain language too: what it means, where it
+    came from, and how much it is worth."""
+
+    def _e(self, **kw):
+        from app.reasoning.critic import Evidence
+        return Evidence(**kw)
+
+    @pytest.fixture
+    def shape_(self):
+        return build_corridor(great_circle(KPIT, KBOS, 24))
+
+    def test_every_level_has_a_sensation_description(self):
+        from app.reasoning.evidence import SENSATION
+        for level in (Severity.SMOOTH, Severity.LIGHT, Severity.MODERATE,
+                      Severity.SEVERE, Severity.EXTREME):
+            assert SENSATION.get(level), level
+
+    def test_the_descriptions_match_the_faa_criteria(self):
+        """Paraphrased from AIM Table 7-1-11 and AC 120-88A. These are the
+        published effects on occupants, not invented ones."""
+        from app.reasoning.evidence import SENSATION
+        assert "slight strain" in SENSATION[Severity.LIGHT]
+        assert "definite strain" in SENSATION[Severity.MODERATE]
+        assert "positive control" in SENSATION[Severity.MODERATE]
+        assert "violently" in SENSATION[Severity.SEVERE]
+        assert "momentarily out of control" in SENSATION[Severity.SEVERE]
+        assert "structural damage" in SENSATION[Severity.EXTREME]
+
+    def test_no_description_promises_comfort(self):
+        """Light is the level most likely to be read as reassurance. None of
+        these may tell a passenger the flight will be fine."""
+        from app.reasoning.evidence import SENSATION
+        banned = ("you'll be fine", "nothing to worry", "perfectly safe",
+                  "don't worry", "no need to worry", "harmless")
+        for level, text in SENSATION.items():
+            low = text.lower()
+            for phrase in banned:
+                assert phrase not in low, f"{level}: {phrase}"
+
+    def test_a_forecast_only_reading_says_it_is_a_forecast(self, shape_):
+        from app.reasoning.evidence import explain_reading
+        text = explain_reading(self._e(
+            reading=Severity.MODERATE, forecast_reading=Severity.MODERATE,
+            forecast_count=1), shape_)
+        assert "forecast" in text
+        assert "rather than what anyone has felt" in text
+
+    def test_a_pilot_only_reading_says_the_forecast_is_silent(self, shape_):
+        from app.reasoning.evidence import explain_reading
+        text = explain_reading(self._e(
+            reading=Severity.LIGHT, observed_reading=Severity.LIGHT,
+            observed_count=2, coverage_fraction=0.2,
+            mean_age_minutes=27), shape_)
+        assert "No forecast covers this route" in text
+        assert "27 minutes old" in text
+
+    def test_thin_coverage_is_stated(self, shape_):
+        from app.reasoning.evidence import explain_reading
+        text = explain_reading(self._e(
+            reading=Severity.LIGHT, observed_reading=Severity.LIGHT,
+            observed_count=2, coverage_fraction=0.2), shape_)
+        assert "20%" in text
+        assert "unobserved" in text
+
+    def test_a_disagreement_is_explained_not_hidden(self, shape_):
+        from app.reasoning.evidence import explain_reading
+        text = explain_reading(self._e(
+            reading=Severity.MODERATE, observed_reading=Severity.LIGHT,
+            observed_count=3, forecast_reading=Severity.MODERATE,
+            forecast_count=1), shape_)
+        assert "disagree" in text
+        assert "average would match neither" in text
+
+    def test_a_lone_severe_report_is_qualified(self, shape_):
+        """One aircraft hitting severe air is worth knowing and is not the
+        same as a pattern."""
+        from app.reasoning.evidence import explain_reading
+        text = explain_reading(self._e(
+            reading=Severity.SEVERE, observed_reading=Severity.SEVERE,
+            observed_count=1, coverage_fraction=0.1), shape_)
+        assert "single report" in text
+        assert "does not mean every aircraft will" in text
+
+    def test_counts_read_naturally(self, shape_):
+        from app.reasoning.evidence import explain_reading
+        one = explain_reading(self._e(
+            reading=Severity.LIGHT, observed_reading=Severity.LIGHT,
+            observed_count=1), shape_)
+        many = explain_reading(self._e(
+            reading=Severity.LIGHT, observed_reading=Severity.LIGHT,
+            observed_count=3), shape_)
+        assert "1 pilot report " in one and "(s)" not in one
+        assert "3 pilot reports" in many
+
+    def test_an_unresolved_reading_gets_no_sensation_text(self, shape_):
+        from app.reasoning.evidence import explain_reading
+        assert explain_reading(self._e(reading=Severity.UNRESOLVED),
+                               shape_) == ""
+
+    def test_a_resolved_gather_carries_the_explanation(self, shape):
+        from app.sources.gairmet import GairmetClient
+        client = GairmetClient(transport=lambda p, q: (200, [{
+            "hazard": "TURB-HI", "severity": "MOD", "base": "300",
+            "top": "400", "validTime": "2026-08-16T12:00:00.000Z",
+            "expireTime": 1786892400,
+            "coords": [{"lat": str(lat), "lon": str(lon)}
+                       for lat, lon in wide_ring()]}], ""))
+        res = gather_evidence(shape, gairmet_client=client, when=NOW)
+        assert res.summary
+        assert "Moderate turbulence" in res.summary

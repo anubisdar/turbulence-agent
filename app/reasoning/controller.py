@@ -113,6 +113,12 @@ class Generator(Protocol):
                  budget: Budget) -> Sequence[Corridor]: ...
 
 
+#: Optional hook: given the corridors that survived a level, return them
+#: with turbulence evidence attached. Run after pruning rather than before,
+#: so a corridor about to be discarded by dominance does not cost a fetch.
+Enricher = Callable[[Sequence[Corridor], Budget], Sequence[Corridor]]
+
+
 @dataclass
 class Level:
     """One depth of the tree, retained for traceability."""
@@ -187,6 +193,7 @@ def search(
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
     budget: Budget | None = None,
     overlap_fn: Callable[[Corridor, Corridor], float] | None = None,
+    enrich: Enricher | None = None,
 ) -> SearchResult:
     """Run the beam search and return the tree, the survivors, and why it stopped."""
     budget = budget or Budget()
@@ -246,8 +253,17 @@ def search(
 
         by_id = {c.id: c for c in candidates}
         frontier = [by_id[s.corridor_id] for s in beam.kept]
+
+        # Evidence is gathered only for survivors. Fetching turbulence for a
+        # corridor that dominance is about to discard spends a call on an
+        # answer nobody reads.
+        if enrich and frontier:
+            frontier = list(enrich(frontier, budget))
+            for c in frontier:
+                by_id[c.id] = c
+
         result.survivors = list(frontier)
-        result.reading = final_reading(beam, candidates)
+        result.reading = final_reading(beam, list(by_id.values()))
 
         if not frontier:
             result.stop = Stop.NO_SURVIVORS

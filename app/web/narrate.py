@@ -187,6 +187,70 @@ def narrate(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 f"{c['id']} {_fl(c.get('altitude_min_ft'))}-{_fl(c.get('altitude_max_ft'))}"
                 for c in depth2), pause=BEAT_LONG))
 
+    # ---------------------------------------------------------- evidence
+    wx = out.get("turbulence") or {}
+    observed = wx.get("observed") or {}
+    forecast = wx.get("forecast") or {}
+
+    turbulence_off = req.get("include_turbulence") is False
+    looked = bool(wx) and not turbulence_off
+
+    if observed.get("count") or forecast.get("count"):
+        beats.append(_beat(
+            STATE, "Evidence",
+            f"Gathered turbulence evidence along the surviving corridors, and "
+            f"only those: fetching for a corridor about to be discarded would "
+            f"spend a call on an answer nobody reads.",
+            f"{observed.get('count', 0)} pilot report(s) · "
+            f"{forecast.get('count', 0)} forecast(s)", pause=BEAT))
+    elif looked:
+        # Saying nothing about a search that happened is the same gap as
+        # saying nothing about a result. A reader should be able to tell
+        # "we looked and found nothing" from "we never looked."
+        beats.append(_beat(
+            STATE, "Evidence",
+            "Looked for pilot reports and turbulence forecasts along the "
+            "surviving corridors and found neither. Both sources were "
+            "queried; neither had anything to say about this route.",
+            wx.get("summary"), kind="caution", pause=BEAT_LONG))
+    elif turbulence_off:
+        beats.append(_beat(
+            STATE, "Evidence",
+            "Turbulence lookup was switched off for this search, so neither "
+            "pilot reports nor forecasts were queried. Nothing is known "
+            "about the air on this route.",
+            kind="caution", pause=BEAT))
+
+    if observed.get("count"):
+        age = observed.get("mean_age_minutes")
+        beats.append(_beat(
+            STATE, "Evidence",
+            f"Pilots flying inside this corridor reported "
+            f"{observed.get('reading')}. Where reports disagree the worst one "
+            f"is used and the count is kept, so one alarming report is "
+            f"distinguishable from several calm ones.",
+            f"{observed['count']} report(s)"
+            + (f", average {age:.0f} minutes old" if age else ""),
+            pause=BEAT))
+
+    if forecast.get("count"):
+        beats.append(_beat(
+            STATE, "Evidence",
+            f"The forecast covering this corridor calls for "
+            f"{forecast.get('reading')}. A forecast is a wide shape over "
+            f"several hours, so it is treated as a separate opinion rather "
+            f"than merged with what pilots actually felt.",
+            f"{forecast['count']} advisory(s)", pause=BEAT))
+
+    if wx.get("disagree"):
+        beats.append(_beat(
+            CRITIC, "Guardrail",
+            f"The two sources disagree: pilots say {observed.get('reading')}, "
+            f"the forecast says {forecast.get('reading')}. Both are reported "
+            f"and the worse one is used. Averaging them would produce a number "
+            f"neither source supports.",
+            kind="caution", pause=BEAT_LONG))
+
     # ---------------------------------------------------------- guardrail
     no_coverage = [c for c in depth1
                    if (c.get("components", {}) or {}).get("coverage", 0) == 0]
@@ -194,9 +258,9 @@ def narrate(payload: dict[str, Any]) -> list[dict[str, Any]]:
         beats.append(_beat(
             CRITIC, "Guardrail",
             "Every corridor scored zero on data coverage, because no "
-            "turbulence observations are attached yet. That lowered the "
-            "scores but eliminated nothing: a corridor nobody has reported on "
-            "is unobserved, not smooth. Coverage is never allowed to prune.",
+            "turbulence observations were found. That lowered the scores but "
+            "eliminated nothing: a corridor nobody has reported on is "
+            "unobserved, not smooth. Coverage is never allowed to prune.",
             kind="caution", pause=BEAT_LONG))
 
     # ---------------------------------------------------------- termination
@@ -240,12 +304,21 @@ def narrate(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "Turbulence reading: unresolved. The agent found the corridor but "
             "has nothing to say about the air in it, and it will not fill that "
             "silence with a guess. Unresolved is not smooth.",
+            # The plain explanation already appeared on the Evidence beat
+            # above; repeating it here makes the panel read like a loop.
+            wx.get("summary") if not looked else None,
             kind="caution", pause=BEAT_LONG))
     elif reading:
+        detail = None
+        if observed.get("count") or forecast.get("count"):
+            detail = (f"pilots {observed.get('reading', 'unknown')} · "
+                      f"forecast {forecast.get('reading', 'unknown')}")
         beats.append(_beat(
             CRITIC, "Decision",
-            f"Turbulence reading along the selected corridor: {reading}.",
-            pause=BEAT_LONG))
+            f"Turbulence reading along the selected corridor: {reading}. "
+            f"Where the two sources differ this is the worse of them, which "
+            f"is the direction a nervous passenger cares about.",
+            detail, pause=BEAT_LONG))
 
     if out.get("contested"):
         beats.append(_beat(

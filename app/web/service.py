@@ -170,6 +170,9 @@ class SearchRequest:
     departure_time: str | None = None      # "HH:MM" UTC
     departure_date: str | None = None      # "YYYY-MM-DD", recorded not queried
     include_reputation: bool = False
+    #: On by default. Turning it off leaves every reading unresolved, which
+    #: is honest but is not what the agent is for.
+    include_turbulence: bool = True
 
 
 def _build_client(req: SearchRequest, api_key: str | None
@@ -190,6 +193,38 @@ def _build_client(req: SearchRequest, api_key: str | None
             "fixture mode."
         )
     return AeroAPIClient(api_key=api_key), None
+
+
+def _turbulence_sources(enabled: bool):
+    """Build the two turbulence sources, or nothing if they are switched off.
+
+    Either source failing to construct leaves that half unavailable and is
+    reported downstream. Neither absence ever becomes a reading.
+    """
+    if not enabled:
+        return None, None, ["Turbulence lookup was switched off for this "
+                            "search, so every reading stays unresolved."]
+
+    notes: list[str] = []
+    fetch = None
+    try:
+        from app.reasoning.evidence import sync_pirep_fetcher
+        from app.sources.awc import fetch_pireps
+        fetch = sync_pirep_fetcher(fetch_pireps)
+    except Exception as e:  # noqa: BLE001
+        notes.append(f"Pilot reports are unavailable ({type(e).__name__}). "
+                     f"The observed side will be unknown, not clear.")
+
+    client = None
+    try:
+        from app.sources.gairmet import GairmetClient
+        client = GairmetClient()
+    except Exception as e:  # noqa: BLE001
+        notes.append(f"Turbulence forecasts are unavailable "
+                     f"({type(e).__name__}). The forecast side will be "
+                     f"unknown, not clear.")
+
+    return fetch, client, notes
 
 
 def _corridor_meta(result: SearchResult,
@@ -223,7 +258,57 @@ def _corridor_meta(result: SearchResult,
                 "altitude_min_ft": shape.altitude_min_ft if shape else None,
                 "altitude_max_ft": shape.altitude_max_ft if shape else None,
             }
+            evidence = corridor.evidence if corridor else None
+            if evidence is not None:
+                meta[cid].update({
+                    "reading": evidence.reading.value,
+                    # Observed and forecast are kept apart all the way to the
+                    # interface, so a disagreement is visible rather than
+                    # blended into one number.
+                    "observed_reading": evidence.observed_reading.value,
+                    "observed_count": evidence.observed_count,
+                    "forecast_reading": evidence.forecast_reading.value,
+                    "forecast_count": evidence.forecast_count,
+                    "sources_disagree": evidence.sources_disagree,
+                    "mean_age_minutes": evidence.mean_age_minutes,
+                })
     return meta
+
+
+def _turbulence_summary(result: SearchResult, generator) -> dict[str, Any]:
+    """The winning corridor's two readings, kept separate.
+
+    The combined reading is the worse of the two, which is the conservative
+    direction. Showing only that would hide whether the sources agreed.
+    """
+    winner = result.winner
+    evidence = winner.evidence if winner else None
+    if evidence is None:
+        return {"available": False,
+                "reason": "No corridor survived, so nothing was gathered.",
+                "summary": "No route could be established, so nothing is "
+                           "known about the air on it."}
+
+    # One plain sentence for a reader who will not read the notes.
+    gathered = getattr(generator, "evidence", {}).get(winner.id)
+    summary = getattr(gathered, "summary", None) if gathered else None
+
+    return {
+        "summary": summary,
+        "available": evidence.reading.value != "unresolved",
+        "reading": evidence.reading.value,
+        "observed": {
+            "reading": evidence.observed_reading.value,
+            "count": evidence.observed_count,
+            "mean_age_minutes": evidence.mean_age_minutes,
+        },
+        "forecast": {
+            "reading": evidence.forecast_reading.value,
+            "count": evidence.forecast_count,
+        },
+        "disagree": evidence.sources_disagree,
+        "coverage_fraction": evidence.coverage_fraction,
+    }
 
 
 def _overlaps(shapes: dict[str, CorridorShape]) -> list[dict]:
@@ -254,10 +339,14 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
         init_fixes(conn)
         cache_before = cache_stats(conn)["total"]
 
+        fetch_pireps, gairmet_client, wx_notes = _turbulence_sources(
+            req.include_turbulence)
+
         generator = CorridorGenerator(
             client=client, conn=conn,
             origin=req.origin.upper(), dest=req.dest.upper(),
             width_nm=req.width_nm, target_time=req.departure_time,
+            fetch_pireps=fetch_pireps, gairmet_client=gairmet_client,
         )
         runner = search_graph if req.use_graph else search
         result = runner(
@@ -267,6 +356,9 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
             confidence_threshold=req.confidence_threshold,
             budget=Budget(max_tool_calls=req.max_tool_calls),
             overlap_fn=generator.overlap_fn,
+            # Survivors only: see controller.search. A corridor about to be
+            # pruned by dominance should not cost a weather fetch.
+            enrich=generator.gather_for_survivors,
         )
 
         corridors_by_id: dict[str, Corridor] = {}
@@ -292,6 +384,7 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
                 "departure_date": req.departure_date,
                 "departure_time": req.departure_time,
                 "include_reputation": req.include_reputation,
+                "include_turbulence": req.include_turbulence,
             },
             "aircraft": aircraft,
             "reputation": reputation,
@@ -306,6 +399,7 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
                 "winner": result.winner.id if result.winner else None,
                 "reading": result.reading.value,
                 "survivors": [c.id for c in result.survivors],
+                "turbulence": _turbulence_summary(result, generator),
             },
             "corridors": [
                 {"id": cid, **values} for cid, values in meta.items()
@@ -314,7 +408,7 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
                         "features": corridor_features(generator.shapes, meta)},
             "overlaps": _overlaps(generator.shapes),
             "trace": result.trace(),
-            "notes": result.notes,
+            "notes": result.notes + wx_notes,
             "generator_notes": generator.notes,
             "fix_cache": {
                 "before": cache_before,

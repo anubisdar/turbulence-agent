@@ -406,7 +406,16 @@ def evaluate(
             if abs(scores[a.id].total - scores[b.id].total) > TIE_EPSILON:
                 continue
             ra, rb = a.evidence.reading, b.evidence.reading
-            if ra is rb:
+            if ra is rb and ra is Severity.UNRESOLVED:
+                # Two corridors knowing nothing is the same silence twice,
+                # not two sources agreeing. Calling it corroboration would
+                # dress an absence up as a finding.
+                result.notes.append(
+                    f"{a.id} and {b.id} score within {TIE_EPSILON} and "
+                    f"neither has a turbulence reading. That is the same "
+                    f"absence twice, not corroboration."
+                )
+            elif ra is rb:
                 result.notes.append(
                     f"{a.id} and {b.id} score within {TIE_EPSILON} and agree "
                     f"on {ra.value}; corroborating rather than conflicting."

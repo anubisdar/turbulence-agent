@@ -28,6 +28,7 @@ from app.reasoning.controller import (
     DEFAULT_CONFIDENCE_THRESHOLD,
     DEFAULT_DEPTH_LIMIT,
     Budget,
+    Enricher,
     Generator,
     Level,
     SearchResult,
@@ -82,6 +83,7 @@ def build_graph(
     generate: Generator,
     budget: Budget,
     overlap_fn: Callable[[Corridor, Corridor], float] | None = None,
+    enrich: Enricher | None = None,
 ):
     """Compile the search graph.
 
@@ -147,6 +149,12 @@ def build_graph(
         by_id = {c.id: c for c in candidates}
         frontier = [by_id[s.corridor_id] for s in beam.kept]
 
+        # Survivors only, matching the plain loop. See controller.search.
+        if enrich and frontier:
+            frontier = list(enrich(frontier, budget))
+            for c in frontier:
+                by_id[c.id] = c
+
         stop: Stop | None = None
         if not frontier:
             stop = Stop.NO_SURVIVORS
@@ -159,7 +167,7 @@ def build_graph(
             "levels": state["levels"] + [level],
             "frontier": frontier,
             "survivors": list(frontier),
-            "reading": final_reading(beam, candidates),
+            "reading": final_reading(beam, list(by_id.values())),
             "notes": state["notes"] + list(beam.notes),
             "stop": stop,
         }
@@ -202,11 +210,12 @@ def search_graph(
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
     budget: Budget | None = None,
     overlap_fn: Callable[[Corridor, Corridor], float] | None = None,
+    enrich: Enricher | None = None,
 ) -> SearchResult:
     """Run the search through the graph. Signature matches `controller.search`."""
     budget = budget or Budget()
     budget.start()
-    app = build_graph(generate, budget, overlap_fn=overlap_fn)
+    app = build_graph(generate, budget, overlap_fn=overlap_fn, enrich=enrich)
     state = app.invoke(
         initial_state(beam_width, depth_limit, confidence_threshold),
         config={"recursion_limit": max(50, depth_limit * 4 + 10)},

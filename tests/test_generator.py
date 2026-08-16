@@ -313,3 +313,133 @@ class TestCruiseBand:
         gen, _ = make_gen()
         gen(None, 1, Budget(max_tool_calls=12))
         assert any("cruise" in n.lower() for n in gen.notes)
+
+
+#: A threshold no corridor can reach, so these tests exercise depth and
+#: evidence rather than early stopping.
+NO_EARLY_STOP = 1.1
+
+
+class TestEvidenceWiring:
+    """Evidence is attached to survivors after pruning, not to every
+    candidate before it."""
+
+    def _sources(self, severity="MOD", reports=True):
+        from datetime import datetime, timedelta, timezone
+        from app.sources.gairmet import GairmetClient
+        now = datetime(2026, 8, 16, 12, 30, tzinfo=timezone.utc)
+
+        forecast = {
+            "hazard": "TURB-HI", "severity": severity, "top": "400",
+            "base": "300", "validTime": "2026-08-16T12:00:00.000Z",
+            "expireTime": 1786892400,
+            "coords": [{"lat": "43.5", "lon": "-79.0"},
+                       {"lat": "43.5", "lon": "-72.0"},
+                       {"lat": "39.5", "lon": "-72.0"},
+                       {"lat": "39.5", "lon": "-79.0"}],
+        }
+
+        class PR:
+            def __init__(s, lat, lon, alt, sev):
+                s.latitude, s.longitude, s.altitude_ft = lat, lon, alt
+                s.turbulence_severity = sev
+                s.observation_time = now - timedelta(minutes=20)
+
+        fetch = ((lambda bbox, hours: [PR(41.5, -77.0, 34000, "light")])
+                 if reports else (lambda bbox, hours: []))
+        return fetch, GairmetClient(
+            transport=lambda p, q: (200, [forecast], "")), now
+
+    def _gen(self, **kw):
+        fetch, client, now = self._sources(**kw)
+        gen, _ = make_gen()
+        gen.fetch_pireps = fetch
+        gen.gairmet_client = client
+        gen.when = now
+        return gen
+
+    def test_a_reading_is_produced_once_sources_are_wired(self):
+        from app.reasoning.controller import Budget, search
+        from app.reasoning.critic import Severity
+        gen = self._gen()
+        res = search(gen, beam_width=2, depth_limit=1,
+                     confidence_threshold=NO_EARLY_STOP,
+                     budget=Budget(max_tool_calls=14),
+                     overlap_fn=gen.overlap_fn,
+                     enrich=gen.gather_for_survivors)
+        assert res.reading is not Severity.UNRESOLVED
+
+    def test_without_sources_the_reading_stays_unresolved(self):
+        """No turbulence layer must never mean smooth air."""
+        from app.reasoning.controller import Budget, search
+        from app.reasoning.critic import Severity
+        gen, _ = make_gen()
+        res = search(gen, beam_width=2, depth_limit=1,
+                     confidence_threshold=NO_EARLY_STOP,
+                     budget=Budget(max_tool_calls=14),
+                     overlap_fn=gen.overlap_fn,
+                     enrich=gen.gather_for_survivors)
+        assert res.reading is Severity.UNRESOLVED
+
+    def test_evidence_is_only_gathered_for_survivors(self):
+        """Fetching for a corridor about to be pruned spends a call on an
+        answer nobody reads."""
+        from app.reasoning.controller import Budget, search
+        gen = self._gen()
+        res = search(gen, beam_width=1, depth_limit=1,
+                     confidence_threshold=NO_EARLY_STOP,
+                     budget=Budget(max_tool_calls=14),
+                     overlap_fn=gen.overlap_fn,
+                     enrich=gen.gather_for_survivors)
+        assert len(gen.evidence) <= 1
+        assert set(gen.evidence) <= {c.id for c in res.survivors}
+
+    def test_the_gather_counts_against_the_budget(self):
+        from app.reasoning.controller import Budget, search
+        gen = self._gen()
+        budget = Budget(max_tool_calls=14)
+        search(gen, beam_width=2, depth_limit=1,
+               confidence_threshold=NO_EARLY_STOP, budget=budget,
+               overlap_fn=gen.overlap_fn, enrich=gen.gather_for_survivors)
+        assert budget.calls_used > gen.client.calls_made
+
+    def test_an_exhausted_budget_leaves_the_reading_unresolved(self):
+        from app.reasoning.controller import Budget, search
+        from app.reasoning.critic import Severity
+        gen = self._gen()
+        res = search(gen, beam_width=2, depth_limit=1,
+                     confidence_threshold=NO_EARLY_STOP,
+                     budget=Budget(max_tool_calls=4),
+                     overlap_fn=gen.overlap_fn,
+                     enrich=gen.gather_for_survivors)
+        assert res.reading is Severity.UNRESOLVED
+
+    def test_altitude_branches_gather_their_own_evidence(self):
+        """Same lateral corridor, different air. A report at FL340 is not
+        evidence about FL315."""
+        from app.reasoning.controller import Budget, search
+        gen = self._gen()
+        search(gen, beam_width=2, depth_limit=2,
+               confidence_threshold=NO_EARLY_STOP,
+               budget=Budget(max_tool_calls=24), overlap_fn=gen.overlap_fn,
+               enrich=gen.gather_for_survivors)
+        children = [k for k in gen.evidence if "/" in k]
+        assert len(children) >= 2, "each surviving band needs its own evidence"
+        # The bands differ, so their evidence may differ too.
+        bands = {gen.shapes[k].altitude_min_ft for k in children}
+        assert len(bands) > 1
+
+    def test_the_graph_agrees_with_the_loop(self):
+        from app.reasoning.controller import Budget, search
+        from app.reasoning.graph import search_graph
+        kw = dict(beam_width=2, depth_limit=2,
+                  confidence_threshold=NO_EARLY_STOP,
+                  overlap_fn=None)
+        a_gen = self._gen()
+        a = search(a_gen, budget=Budget(max_tool_calls=20),
+                   enrich=a_gen.gather_for_survivors, **kw)
+        b_gen = self._gen()
+        b = search_graph(b_gen, budget=Budget(max_tool_calls=20),
+                         enrich=b_gen.gather_for_survivors, **kw)
+        assert a.reading is b.reading
+        assert a.trace() == b.trace()

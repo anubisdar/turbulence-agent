@@ -32,7 +32,7 @@ scores neutral, never zero, and never prunes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Sequence
 
 from app.reasoning.controller import Budget
@@ -43,6 +43,7 @@ from app.reasoning.critic import (
     Provenance,
     Severity,
 )
+from app.reasoning.evidence import GatherResult, gather_evidence
 from app.reasoning.geometry import (
     DEFAULT_WIDTH_NM,
     CorridorShape,
@@ -94,12 +95,22 @@ class CorridorGenerator:
     #: flight is chosen by time of day rather than simply by recency.
     target_time: str | None = None
 
+    #: Turbulence sources. Both optional: without them the search still runs
+    #: and every corridor reports its reading as unresolved, which is the
+    #: honest answer rather than a silent assumption of calm.
+    fetch_pireps: object | None = None
+    gairmet_client: object | None = None
+    when: object | None = None
+
     shapes: dict[str, CorridorShape] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     _flight: FlightSegment | None = field(default=None, repr=False)
     _looked_for_flight: bool = field(default=False, repr=False)
     _segments: list = field(default_factory=list, repr=False)
     _pair_altitude_band: tuple[int, int] | None = field(default=None, repr=False)
+    #: Evidence keyed by corridor id, kept so the interface can show which
+    #: reports and forecasts produced a reading.
+    evidence: dict[str, GatherResult] = field(default_factory=dict)
 
     # ------------------------------------------------------------ helpers
 
@@ -365,6 +376,48 @@ class CorridorGenerator:
         return None
 
     # ------------------------------------------------------------ depth 2
+
+    def _gather_for(self, corridor: Corridor, budget: Budget) -> Corridor:
+        """Attach turbulence evidence to one corridor.
+
+        Called on survivors rather than on every candidate. Gathering for a
+        corridor that is about to be pruned by dominance would spend a call
+        on an answer nobody reads, and depth-1 pruning is decided by
+        provenance and geometry regardless.
+        """
+        shape = self.shapes.get(corridor.id)
+        if shape is None:
+            return corridor
+        if corridor.id in self.evidence:
+            return corridor
+
+        if not (self.fetch_pireps or self.gairmet_client):
+            return corridor
+
+        if not budget.spend():
+            self._note(
+                f"Tool budget exhausted before turbulence evidence could be "
+                f"gathered for {corridor.id}. Its reading stays unresolved, "
+                f"which is not the same as smooth."
+            )
+            return corridor
+
+        result = gather_evidence(
+            shape,
+            fetch_pireps=self.fetch_pireps,
+            gairmet_client=self.gairmet_client,
+            when=self.when,
+        )
+        self.evidence[corridor.id] = result
+        for n in result.notes:
+            self._note(f"{corridor.id}: {n}")
+
+        return replace(corridor, evidence=result.evidence)
+
+    def gather_for_survivors(self, survivors: Sequence[Corridor],
+                             budget: Budget) -> list[Corridor]:
+        """Attach evidence to the corridors that made it through the beam."""
+        return [self._gather_for(c, budget) for c in survivors]
 
     def _altitude_branches(self, parent: Corridor) -> list[Corridor]:
         """Branch a surviving corridor on the altitudes actually filed.

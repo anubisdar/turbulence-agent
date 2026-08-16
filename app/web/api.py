@@ -97,6 +97,10 @@ class CorridorSearchBody(BaseModel):
     include_reputation: bool = Field(
         False, description="Also retrieve the NTSB safety record for the "
                            "aircraft type on this route")
+    include_turbulence: bool = Field(
+        True, description="Gather pilot reports and turbulence forecasts "
+                          "along the surviving corridors. Switching this off "
+                          "leaves every reading unresolved.")
 
     def to_request(self) -> SearchRequest:
         return SearchRequest(
@@ -108,6 +112,7 @@ class CorridorSearchBody(BaseModel):
             departure_date=self.departure_date,
             departure_time=self.departure_time,
             include_reputation=self.include_reputation,
+            include_turbulence=self.include_turbulence,
         )
 
 

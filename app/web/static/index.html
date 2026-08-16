@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title> &middot; Flight Turbulence Agent</title>
+<title>Corridor search &middot; turbulence agent</title>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
@@ -147,6 +147,27 @@ body{transition:background .18s,color .18s}
 }
 .reading.known{color:var(--live)}
 .reading-note{color:var(--muted);font-size:12.5px;margin-top:4px}
+.sources{
+  display:flex;gap:1px;background:var(--rule);
+  border:1px solid var(--rule);margin-top:12px;
+}
+.source{background:var(--panel);padding:8px 10px;flex:1}
+.source b{
+  display:block;font-family:var(--fd);font-size:14px;font-weight:600;
+  text-transform:uppercase;letter-spacing:.04em;
+}
+.source span{
+  font-family:var(--fm);font-size:9.5px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim);
+}
+.source.quiet b{color:var(--dim)}
+.sources.split{border-color:var(--caution)}
+.sources.split .source b{color:var(--caution)}
+.split-note{
+  margin-top:8px;padding:7px 9px;background:var(--caution-bg);
+  border-left:2px solid var(--caution);font-size:12px;color:var(--caution-ink);
+}
+
 .stats{
   display:grid;grid-template-columns:repeat(3,1fr);gap:1px;
   background:var(--rule);border:1px solid var(--rule);margin-top:14px;
@@ -319,7 +340,7 @@ pre .p{color:var(--dead)}
 <div class="shell">
 
   <header class="masthead">
-    <h1>med Flight Turbulenc AI Agent Capstone</h1>
+    <h1>Corridor search</h1>
     <div class="sub" id="routeLabel">no search yet</div>
     <div class="spacer"></div>
     <div class="sub" id="srcLabel"></div>
@@ -340,6 +361,8 @@ pre .p{color:var(--dead)}
           <label><span>Time (UTC)</span><input type="time" id="time" value="13:00"></label>
         </div>
         <div class="toggles">
+          <label class="toggle"><input type="checkbox" id="turbulence" checked>
+            Look up turbulence along the route</label>
           <label class="toggle"><input type="checkbox" id="reputation" checked>
             Include the aircraft&rsquo;s safety record</label>
           <label class="toggle"><input type="checkbox" id="fixtures">
@@ -530,6 +553,8 @@ function renderCorridors(data){
           <span>${esc((c.provenance||'').replace(/_/g,' '))}</span>
           ${c.length_nm ? `<span>${c.length_nm.toFixed(0)} nm</span>` : ''}
           ${alt(c) ? `<span>${alt(c)}</span>` : ''}
+          ${c.reading && c.reading !== 'unresolved'
+            ? `<span style="color:var(--caution)">${esc(c.reading)}</span>` : ''}
         </div>
         ${decomp(c)}
         ${c.reason ? `<div class="why">${esc(c.reason)}</div>` : ''}
@@ -541,13 +566,39 @@ function renderCorridors(data){
 function renderVerdict(data){
   const o = data.outcome;
   const known = o.reading !== 'unresolved';
+  const wx = o.turbulence || {};
+  const obs = wx.observed || {}, fc = wx.forecast || {};
+  const off = data.request && data.request.include_turbulence === false;
+
+  const label = r => (!r || r === 'unresolved') ? 'none' : r;
+  const quiet = r => (!r || r === 'unresolved') ? ' quiet' : '';
+
+  const sources = (obs.count || fc.count || known) ? `
+      <div class="sources${wx.disagree ? ' split' : ''}">
+        <div class="source${quiet(obs.reading)}">
+          <b>${esc(label(obs.reading))}</b>
+          <span>pilots &middot; ${obs.count || 0} report${obs.count === 1 ? '' : 's'}</span>
+        </div>
+        <div class="source${quiet(fc.reading)}">
+          <b>${esc(label(fc.reading))}</b>
+          <span>forecast &middot; ${fc.count || 0} advisor${fc.count === 1 ? 'y' : 'ies'}</span>
+        </div>
+      </div>
+      ${wx.disagree ? `<div class="split-note">The two sources disagree.
+        Both are shown and the worse one is used, because an average would
+        match neither report.</div>` : ''}` : '';
+
   $('verdict').innerHTML = `
     <div class="verdict">
       <div class="eyebrow">Turbulence reading</div>
       <div class="reading ${known ? 'known' : ''}">${esc(o.reading)}</div>
-      <div class="reading-note">${known
-        ? 'Derived from observations along the selected corridor.'
-        : 'No turbulence evidence is attached yet. Unresolved is not smooth.'}</div>
+      <div class="reading-note">${
+        off ? 'Turbulence lookup was switched off for this search.'
+        : known ? esc(wx.summary
+            || 'From pilot reports and forecasts along the selected corridor.')
+        : esc(wx.summary || 'Nothing was found along this corridor.')
+          + ' Unresolved is not smooth.'}</div>
+      ${sources}
       <div class="stats">
         <div class="stat"><b>${o.nodes_generated}</b><span>nodes</span></div>
         <div class="stat"><b>${o.calls_used}</b><span>api calls</span></div>
@@ -702,6 +753,7 @@ async function run(){
     max_tool_calls: +$('calls').value, width_nm: +$('width').value,
     use_graph: $('graph').checked, use_fixtures: $('fixtures').checked,
     include_reputation: $('reputation').checked,
+    include_turbulence: $('turbulence').checked,
   };
   if($('date').value) body.departure_date = $('date').value;
   if($('time').value) body.departure_time = $('time').value;

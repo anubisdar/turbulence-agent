@@ -444,3 +444,146 @@ class TestNarration:
                          "overlaps": []})
         assert isinstance(beats, list)
         assert beats
+
+
+class TestTurbulenceToggle:
+    """Turbulence lookup is on by default. Switching it off must leave the
+    reading unresolved rather than implying calm air."""
+
+    def test_on_by_default(self, client):
+        assert do_search(client)["request"]["include_turbulence"] is True
+
+    def test_off_is_echoed_and_explained(self, client):
+        data = do_search(client, include_turbulence=False)
+        assert data["request"]["include_turbulence"] is False
+        assert data["outcome"]["reading"] == "unresolved"
+        assert any("switched off" in n for n in data["notes"])
+
+    def test_off_never_reports_smooth(self, client):
+        data = do_search(client, include_turbulence=False)
+        assert data["outcome"]["reading"] != "smooth"
+
+    def test_the_summary_is_present_either_way(self, client):
+        for flag in (True, False):
+            wx = do_search(client, include_turbulence=flag)["outcome"]["turbulence"]
+            assert wx is not None
+            assert "available" in wx
+
+
+class TestTurbulenceSummaryShape:
+    """Fields the verdict strip reads. Renaming one empties part of the UI."""
+
+    def test_the_two_sources_are_reported_separately(self, client):
+        wx = do_search(client)["outcome"]["turbulence"]
+        assert "observed" in wx and "forecast" in wx
+        for side in ("observed", "forecast"):
+            assert "reading" in wx[side]
+            assert "count" in wx[side]
+
+    def test_disagreement_is_a_flag_not_an_average(self, client):
+        wx = do_search(client)["outcome"]["turbulence"]
+        assert "disagree" in wx
+        assert isinstance(wx["disagree"], bool)
+
+    def test_corridors_carry_their_own_readings(self, client):
+        for c in do_search(client)["corridors"]:
+            if c.get("kept"):
+                for field in ("reading", "observed_reading",
+                              "forecast_reading", "sources_disagree"):
+                    assert field in c, field
+
+
+class TestNarrationCoversEvidence:
+    def test_a_disagreement_is_narrated_as_a_guardrail(self):
+        from app.web.narrate import narrate
+        payload = {
+            "request": {"origin": "KPIT", "dest": "KBOS", "beam_width": 2,
+                        "depth_limit": 2, "max_tool_calls": 14},
+            "outcome": {"stop": "depth_limit", "nodes_generated": 8,
+                        "calls_used": 8, "depth_reached": 2,
+                        "winner": "track/high", "reading": "moderate",
+                        "elapsed_seconds": 3.2,
+                        "turbulence": {
+                            "available": True, "reading": "moderate",
+                            "observed": {"reading": "light", "count": 2,
+                                         "mean_age_minutes": 27.5},
+                            "forecast": {"reading": "moderate", "count": 1},
+                            "disagree": True, "coverage_fraction": 0.2}},
+            "corridors": [], "overlaps": [],
+            "fix_cache": {"before": 27, "after": 27, "by_type": {}},
+        }
+        text = " ".join(b["text"] for b in narrate(payload))
+        assert "the two sources disagree" in text.lower()
+        assert "neither source supports" in text
+        cautions = [b for b in narrate(payload)
+                    if b["kind"] == "caution" and "disagree" in b["text"]]
+        assert cautions, "a disagreement must be flagged, not stated quietly"
+
+
+class TestNarrationCoversAnEmptySearch:
+    """Silence about a search that happened is the same gap as silence about
+    a result. A reader must be able to tell "we looked and found nothing"
+    from "we never looked"."""
+
+    def _payload(self, **outcome):
+        base = {
+            "request": {"origin": "KPIT", "dest": "KBOS", "beam_width": 2,
+                        "depth_limit": 2, "max_tool_calls": 8},
+            "corridors": [], "overlaps": [],
+            "fix_cache": {"before": 27, "after": 27, "by_type": {}},
+            "outcome": {
+                "stop": "depth_limit", "nodes_generated": 8, "calls_used": 8,
+                "depth_reached": 2, "winner": "track/high",
+                "reading": "unresolved", "elapsed_seconds": 12.5,
+                "turbulence": {
+                    "available": False, "reading": "unresolved",
+                    "observed": {"reading": "unresolved", "count": 0},
+                    "forecast": {"reading": "unresolved", "count": 0},
+                    "disagree": False,
+                    "summary": "This is a short hop of about 431 nautical "
+                               "miles. Nothing is known either way."},
+            },
+        }
+        base["outcome"].update(outcome)
+        return base
+
+    def test_a_search_that_found_nothing_is_still_narrated(self):
+        from app.web.narrate import narrate
+        beats = narrate(self._payload())
+        evidence = [b for b in beats if b["concept"] == "Evidence"]
+        assert evidence, "an empty search must still produce an Evidence beat"
+        assert "found neither" in evidence[0]["text"]
+        assert "Both sources were queried" in evidence[0]["text"]
+
+    def test_looking_and_finding_nothing_is_flagged(self):
+        from app.web.narrate import narrate
+        evidence = [b for b in narrate(self._payload())
+                    if b["concept"] == "Evidence"]
+        assert evidence[0]["kind"] == "caution"
+
+    def test_switched_off_is_distinguished_from_found_nothing(self):
+        from app.web.narrate import narrate
+        payload = self._payload()
+        payload["request"]["include_turbulence"] = False
+        text = " ".join(b["text"] for b in narrate(payload)
+                        if b["concept"] == "Evidence")
+        assert "switched off" in text
+        assert "found neither" not in text
+
+    def test_the_explanation_is_not_repeated(self):
+        """The plain summary belongs on one beat, not echoed on the next."""
+        from app.web.narrate import narrate
+        beats = narrate(self._payload())
+        shown = [b for b in beats
+                 if b.get("detail") and "short hop" in str(b["detail"])]
+        assert len(shown) == 1
+
+    def test_no_empty_search_beat_ever_implies_calm(self):
+        from app.web.narrate import narrate
+        for off in (True, False):
+            payload = self._payload()
+            payload["request"]["include_turbulence"] = not off
+            for b in narrate(payload):
+                low = b["text"].lower()
+                assert "smooth" not in low or "not smooth" in low
+                assert "calm" not in low

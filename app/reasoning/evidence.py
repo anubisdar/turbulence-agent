@@ -122,6 +122,10 @@ class GatherResult:
     reports_considered: int = 0
     advisories_inside: int = 0
     advisories_considered: int = 0
+    #: One plain sentence for a reader who will not read the notes. Set
+    #: whenever the reading is unresolved, because "unresolved" on its own
+    #: tells a nervous passenger nothing about why.
+    summary: str | None = None
 
 
 # ------------------------------------------------------------------ helpers
@@ -129,12 +133,21 @@ class GatherResult:
 
 def bounding_box(shape: CorridorShape,
                  pad_deg: float = 1.0) -> tuple[float, float, float, float]:
-    """A lat/lon box around the corridor, padded so the fetch does not clip
-    reports just outside it. Precise containment is tested afterwards."""
+    """A box around the corridor as (min_lat, min_lon, max_lat, max_lon).
+
+    Latitude first, which is what AWC's bbox parameter wants and what
+    `awc.BBox` documents. Getting this backwards is not loud: a Pittsburgh
+    longitude of -80 is a legal latitude, so the request succeeds and
+    quietly searches the South Atlantic. It returns zero reports, which
+    looks exactly like a calm afternoon.
+
+    Padded so the fetch does not clip reports just outside the corridor.
+    Precise containment is tested afterwards, in three dimensions.
+    """
     lats = [p[0] for p in shape.points]
     lons = [p[1] for p in shape.points]
-    return (min(lons) - pad_deg, min(lats) - pad_deg,
-            max(lons) + pad_deg, max(lats) + pad_deg)
+    return (min(lats) - pad_deg, min(lons) - pad_deg,
+            max(lats) + pad_deg, max(lons) + pad_deg)
 
 
 def _age_minutes(when: datetime | None, now: datetime) -> float | None:
@@ -192,6 +205,12 @@ def gather_observed(shape: CorridorShape, reports: Iterable,
     worst_where: str | None = None
     notes: list[str] = []
 
+    # Why a report was rejected matters to a reader. "Somewhere else
+    # entirely" and "directly overhead but at 3,000 feet" are different
+    # facts, and only one of them is worth worrying about.
+    elsewhere = 0                       # not near the route
+    wrong_altitude: list[int] = []       # along the route, wrong height
+
     for r in reports or []:
         considered += 1
         lat = getattr(r, "latitude", None)
@@ -200,6 +219,11 @@ def gather_observed(shape: CorridorShape, reports: Iterable,
             continue
         alt = getattr(r, "altitude_ft", None)
         if not shape.contains(lat, lon, altitude_ft=alt):
+            if shape.contains(lat, lon):
+                if alt is not None:
+                    wrong_altitude.append(alt)
+            else:
+                elsewhere += 1
             continue
 
         inside_points.append((lat, lon))
@@ -224,11 +248,34 @@ def gather_observed(shape: CorridorShape, reports: Iterable,
     cov = coverage_fraction(shape, inside_points)
     mean_age = round(sum(ages) / len(ages), 1) if ages else None
 
-    if considered and not inside_points:
+    if not considered:
+        # Fetching nothing at all must still be said out loud. Silence here
+        # would be the one place absence passes without comment, which is
+        # the failure this project exists to avoid.
         notes.append(
-            f"{considered} pilot report(s) were fetched near this route but "
-            f"none fell inside the corridor at its altitudes. That is an "
-            f"absence of observation, not a report of smooth air."
+            "No pilot reports were filed anywhere near this route in the "
+            "lookback window. Nobody has flown it and said anything, which "
+            "is an absence of observation, not a report of smooth air."
+        )
+    elif not inside_points:
+        if wrong_altitude:
+            highest = max(wrong_altitude)
+            notes.append(
+                f"{len(wrong_altitude)} pilot report(s) were filed along "
+                f"this route but all of them below "
+                f"FL{highest // 100:03d}, well under the cruise altitude. "
+                f"Turbulence at 3,000 feet says nothing about the ride at "
+                f"cruise, so none of them counts as evidence here."
+            )
+        if elsewhere:
+            notes.append(
+                f"{elsewhere} other pilot report(s) were in the surrounding "
+                f"airspace but not along this corridor."
+            )
+        notes.append(
+            "No pilot report describes the air this flight will actually be "
+            "in. That is an absence of observation, not a report of smooth "
+            "air."
         )
     elif count:
         spread = {r.value for r in readings}
@@ -290,6 +337,154 @@ def gather_forecast(shape: CorridorShape,
     return reading, len(matched), notes, len(matched), considered
 
 
+#: A route shorter than this rarely climbs high enough, or stays at cruise
+#: long enough, for anyone to file a report about it.
+SHORT_ROUTE_NM = 600
+
+#: What each level means in the cabin, paraphrased from the FAA turbulence
+#: reporting criteria - AIM Table 7-1-11 and Advisory Circular 120-88A,
+#: "Preventing Injuries Caused by Turbulence". These describe what occupants
+#: experience, which is the part a passenger can use.
+#:
+#: Nothing here promises a comfortable flight. "Light" is the level most
+#: likely to be misread as reassurance, so it describes the sensation and
+#: stops. Whether a given flight is comfortable is not something an advisory
+#: or a stranger's pilot report can tell you.
+SENSATION: dict[Severity, str] = {
+    Severity.SMOOTH:
+        "Reported as smooth, meaning no appreciable turbulence.",
+    Severity.LIGHT:
+        "Light turbulence causes slight, erratic changes in altitude or "
+        "attitude. Occupants may feel a slight strain against seat belts. "
+        "Objects stay put and cabin service can continue.",
+    Severity.MODERATE:
+        "Moderate turbulence causes changes in altitude or attitude, though "
+        "the aircraft stays in positive control throughout. Occupants feel "
+        "definite strain against seat belts, unsecured objects are "
+        "dislodged, and walking is difficult.",
+    Severity.SEVERE:
+        "Severe turbulence causes large, abrupt changes in altitude or "
+        "attitude, and the aircraft may be momentarily out of control. "
+        "Occupants are forced violently against seat belts and unsecured "
+        "objects are tossed about. Cabin service and walking are "
+        "impossible.",
+    Severity.EXTREME:
+        "Extreme turbulence means the aircraft is violently tossed about "
+        "and is practically impossible to control. It may cause structural "
+        "damage. This is rare, and crews route around it wherever it is "
+        "forecast.",
+}
+
+#: Where the FAA descriptions come from. Cited rather than paraphrased
+#: anonymously, since the whole point of this project is that claims carry
+#: their provenance.
+SENSATION_SOURCE = ("FAA turbulence reporting criteria, AIM Table 7-1-11 "
+                    "and Advisory Circular 120-88A")
+
+
+def explain_absence(shape: CorridorShape, reports_considered: int,
+                    reports_inside: int, advisories_considered: int,
+                    advisories_inside: int) -> str:
+    """One sentence saying why there is no reading.
+
+    "Unresolved" is accurate and useless on its own. A passenger wants to
+    know whether nobody looked, or people looked and found nothing, and
+    those are different situations with the same label.
+    """
+    length = shape.length_nm
+    short = length < SHORT_ROUTE_NM
+
+    if reports_considered == 0 and advisories_considered == 0:
+        return ("Neither pilot reports nor forecasts were available, so "
+                "nothing is known about the air on this route.")
+
+    if reports_inside == 0 and advisories_inside == 0:
+        if short:
+            return (f"This is a short hop of about {length:.0f} nautical "
+                    f"miles. No turbulence forecast covers it and no pilot "
+                    f"has reported conditions at cruise along it, which is "
+                    f"common on routes this length. Nothing is known either "
+                    f"way.")
+        return (f"No turbulence forecast covers this route and no pilot has "
+                f"reported conditions at cruise along it in the last few "
+                f"hours. Nothing is known either way.")
+
+    if reports_inside == 0:
+        return ("A forecast covers this route but no pilot has reported "
+                "actual conditions along it, so the forecast is the only "
+                "thing to go on.")
+
+    return ("Pilots have reported along this route but no forecast covers "
+            "it, so the reports are the only thing to go on.")
+
+
+def _plural(n: int, singular: str, plural: str | None = None) -> str:
+    """`1 pilot report` rather than `1 pilot report(s)`. The severe message
+    is the one most likely to be read closely, so it should read cleanly."""
+    return f"{n} {singular if n == 1 else (plural or singular + 's')}"
+
+
+def explain_reading(evidence: Evidence, shape: CorridorShape) -> str:
+    """Plain language for a resolved reading: what it means, where it came
+    from, and how much it is worth.
+
+    The last part matters most. Moderate from one pilot report half an hour
+    ago and moderate from a forecast covering six hours and half a continent
+    are the same word describing very different claims, and a passenger
+    cannot tell them apart unless the sentence says so.
+    """
+    reading = evidence.reading
+    if reading is Severity.UNRESOLVED:
+        return ""
+
+    parts = [SENSATION.get(reading, "")]
+
+    obs, fc = evidence.observed_reading, evidence.forecast_reading
+    obs_n, fc_n = evidence.observed_count, evidence.forecast_count
+
+    if evidence.sources_disagree:
+        parts.append(
+            f"This is the worse of two sources that disagree: "
+            f"{_plural(obs_n, 'pilot report')} said {obs.value} while the forecast "
+            f"said {fc.value}. The worse one is used because an average "
+            f"would match neither.")
+    elif obs is not Severity.UNRESOLVED and fc is not Severity.UNRESOLVED:
+        parts.append(
+            f"Both sources agree: {_plural(obs_n, 'pilot report')} and a forecast "
+            f"both say {reading.value}.")
+    elif obs is not Severity.UNRESOLVED:
+        age = evidence.mean_age_minutes
+        when = f", the most recent about {age:.0f} minutes old" if age else ""
+        parts.append(
+            f"This comes from {_plural(obs_n, 'pilot report')} inside the corridor"
+            f"{when}. No forecast covers this route, so pilots flying it are "
+            f"the only source.")
+    else:
+        parts.append(
+            f"This comes from a turbulence forecast covering the route. A "
+            f"forecast is a broad shape over several hours, so it says what "
+            f"is expected rather than what anyone has felt. No pilot has "
+            f"reported actual conditions along this corridor.")
+
+    coverage = evidence.coverage_fraction
+    if coverage is not None and obs is not Severity.UNRESOLVED:
+        if coverage < 0.34:
+            parts.append(
+                f"Pilot reports cover only about {coverage:.0%} of the "
+                f"route, so most of it is unobserved.")
+        elif coverage < 0.67:
+            parts.append(
+                f"Pilot reports cover roughly {coverage:.0%} of the route.")
+
+    if obs_n == 1 and reading in (Severity.SEVERE, Severity.EXTREME):
+        parts.append(
+            "This rests on a single report. One aircraft encountering "
+            "severe air does not mean every aircraft will, but it is worth "
+            "knowing about.")
+
+    return " ".join(p for p in parts if p)
+
+
 def gather_evidence(shape: CorridorShape,
                     fetch_pireps: PirepFetcher | None = None,
                     gairmet_client: GairmetClient | None = None,
@@ -345,11 +540,11 @@ def gather_evidence(shape: CorridorShape,
             f"averaging them would produce a number neither source supports."
         )
 
+    summary = None
     if combined is Severity.UNRESOLVED:
-        notes.append(
-            "No turbulence evidence was found for this corridor from either "
-            "source. The reading stays unresolved. Unresolved is not smooth."
-        )
+        summary = explain_absence(shape, considered, inside,
+                                  fc_considered, fc_inside)
+        notes.append(f"{summary} Unresolved is not smooth.")
 
     evidence = Evidence(
         coverage_fraction=cov if fetch_pireps is not None else None,
@@ -363,8 +558,11 @@ def gather_evidence(shape: CorridorShape,
         forecast_count=fc_count,
     )
 
+    if summary is None:
+        summary = explain_reading(evidence, shape)
+
     return GatherResult(
-        evidence=evidence, notes=notes,
+        evidence=evidence, notes=notes, summary=summary,
         reports_inside=inside, reports_considered=considered,
         advisories_inside=fc_inside, advisories_considered=fc_considered,
     )
