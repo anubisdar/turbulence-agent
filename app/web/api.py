@@ -81,6 +81,11 @@ class CorridorSearchBody(BaseModel):
     confidence_threshold: float = Field(0.85, ge=0.0, le=1.5)
     max_tool_calls: int = Field(8, ge=1, le=40,
                                 description="Hard cap on metered API calls")
+    max_seconds: float = Field(
+        60.0, ge=5.0, le=300.0,
+        description="Elapsed-time ceiling for the whole search. A search cut "
+                    "off early is marked truncated and reported as the best "
+                    "of what was explored.")
     width_nm: float = Field(25.0, ge=5.0, le=150.0,
                             description="Corridor half-width")
     use_graph: bool = Field(False, description="Route through LangGraph")
@@ -112,7 +117,8 @@ class CorridorSearchBody(BaseModel):
             origin=self.origin, dest=self.dest,
             beam_width=self.beam_width, depth_limit=self.depth_limit,
             confidence_threshold=self.confidence_threshold,
-            max_tool_calls=self.max_tool_calls, width_nm=self.width_nm,
+            max_tool_calls=self.max_tool_calls, max_seconds=self.max_seconds,
+            width_nm=self.width_nm,
             use_graph=self.use_graph, use_fixtures=self.use_fixtures,
             departure_date=self.departure_date,
             departure_time=self.departure_time,

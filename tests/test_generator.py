@@ -606,3 +606,71 @@ class TestNoNonstopService:
         gen = self._gen(self.CONNECTION)
         out = gen(None, 1, Budget(max_tool_calls=12))
         assert "gc" in {c.id for c in out}
+
+
+class TestDegradedSearches:
+    """A search that lost a data source explored less of the tree. That is
+    a different thing from one a budget cut short, and both differ from a
+    search that simply pruned corridors."""
+
+    def _rate_limited(self):
+        import sqlite3
+        from app.sources.aeroapi import AeroAPIClient
+        from app.sources.fixes import init_fixes
+        conn = sqlite3.connect(":memory:")
+        init_fixes(conn)
+        return CorridorGenerator(
+            client=AeroAPIClient(api_key="t",
+                                 transport=lambda p, q: (429, None, "slow"),
+                                 spacing_seconds=0, sleep=lambda s: None),
+            conn=conn, origin="KPIT", dest="KBOS")
+
+    def test_a_rate_limited_search_is_marked_degraded(self):
+        gen = self._rate_limited()
+        gen(None, 1, Budget(max_tool_calls=8))
+        assert gen.degraded
+        assert any("rate limited" in n for n in gen.degraded)
+
+    def test_a_healthy_search_is_not_marked_degraded(self):
+        gen, _ = make_gen()
+        gen(None, 1, Budget(max_tool_calls=12))
+        assert gen.degraded == []
+
+    @pytest.mark.parametrize("note,expected", [
+        ("Could not list flights on this pair: rate limited twice", True),
+        ("Turbulence forecasts could not be fetched (HTTP 403).", True),
+        ("Tool budget exhausted before the flown track was fetched.", True),
+        ("ZZZZ is not an airport AeroAPI recognises.", True),
+        ("Cached 19 route fix(es) from JBU1286.", False),
+        ("Cruise band from the flown track: FL313 to FL350.", False),
+        ("Airway segment(s) J49 approximated as straight legs.", False),
+        ("No pilot reports were filed anywhere near this route.", False),
+    ])
+    def test_real_notes_are_classified_correctly(self, note, expected):
+        """An earlier version matched "could not fetch" and missed "could
+        not be fetched", which is what comes out of the weather layer."""
+        from app.reasoning.generator import _DEGRADED_MARKERS
+        flagged = any(m in note.lower() for m in _DEGRADED_MARKERS)
+        assert flagged is expected
+
+    def test_notes_reach_the_log(self):
+        import io
+        from app.logging_setup import configure
+        buf = io.StringIO()
+        configure(level="DEBUG", use_syslog=False, stream=buf, force=True)
+        gen = self._rate_limited()
+        gen(None, 1, Budget(max_tool_calls=8))
+        logged = buf.getvalue()
+        assert "generator degraded" in logged
+        assert "rate limited" in logged
+
+    def test_an_ordinary_note_logs_without_the_degraded_marker(self):
+        import io
+        from app.logging_setup import configure
+        buf = io.StringIO()
+        configure(level="DEBUG", use_syslog=False, stream=buf, force=True)
+        gen, _ = make_gen()
+        gen(None, 1, Budget(max_tool_calls=12))
+        logged = buf.getvalue()
+        assert "generator note=" in logged
+        assert "generator degraded" not in logged

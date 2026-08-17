@@ -710,3 +710,86 @@ class TestGeoJsonAcrossTheDateLine:
         from app.web.service import _ring_to_geojson
         ring = _ring_to_geojson(self._corridor(self.KSEA, self.RJTT))
         assert ring[0] == ring[-1]
+
+
+class TestTimeLimit:
+    """25 seconds was chosen when a warm search took about a second. Real
+    AeroAPI latency runs 12 to 25 seconds, so the limit was firing on
+    ordinary searches and returning a truncated corridor that read as a
+    different answer to the same question."""
+
+    def test_the_default_clears_the_observed_latency(self):
+        from app.reasoning.controller import DEFAULT_MAX_SECONDS
+        assert DEFAULT_MAX_SECONDS >= 45, \
+            "the ceiling must sit clear of a normal slow search"
+
+    def test_it_is_echoed_back(self, client):
+        assert do_search(client)["request"]["max_seconds"] == 60.0
+
+    def test_it_can_be_set_per_search(self, client):
+        assert do_search(client, max_seconds=120.0)[
+            "request"]["max_seconds"] == 120.0
+
+    @pytest.mark.parametrize("bad", [0.0, 1.0, 600.0, -5.0])
+    def test_implausible_limits_are_rejected(self, client, bad):
+        r = client.post("/api/search/corridors",
+                        json={"origin": "KPIT", "dest": "KBOS",
+                              "use_fixtures": True, "max_seconds": bad})
+        assert r.status_code == 422
+
+    def test_a_tight_limit_still_truncates_rather_than_failing(self, client):
+        """The mechanism was never wrong, only the number."""
+        data = do_search(client, max_seconds=5.0)
+        assert "truncated" in data["outcome"]
+
+
+class TestDegradedIsReported:
+    def test_the_flag_is_in_the_response(self, client):
+        outcome = do_search(client)["outcome"]
+        assert "degraded" in outcome
+        assert "degraded_reasons" in outcome
+
+    def test_degraded_is_a_boolean_with_reasons_when_true(self, client):
+        """Not asserted false: whether a fixture search degrades depends on
+        whether the weather host is reachable from the test machine, which
+        is environment rather than behaviour. What must hold is that the
+        flag and its reasons agree."""
+        outcome = do_search(client)["outcome"]
+        assert isinstance(outcome["degraded"], bool)
+        if outcome["degraded"]:
+            assert outcome["degraded_reasons"]
+        else:
+            assert outcome["degraded_reasons"] == []
+
+    def test_it_is_distinct_from_truncated(self, client):
+        """Different causes, different words. A budget stopping a search and
+        a source failing during one both give a partial answer."""
+        outcome = do_search(client)["outcome"]
+        assert outcome["degraded"] is not None
+        assert outcome["truncated"] is not None
+
+    def test_the_narration_separates_the_two(self):
+        from app.web.narrate import narrate
+        payload = {
+            "request": {"origin": "KPIT", "dest": "KBOS", "beam_width": 2,
+                        "depth_limit": 2, "max_tool_calls": 8},
+            "outcome": {"stop": "depth_limit", "nodes_generated": 1,
+                        "calls_used": 3, "depth_reached": 1, "winner": "gc",
+                        "reading": "light", "elapsed_seconds": 20.2,
+                        "truncated": False, "degraded": True,
+                        "degraded_reasons": [
+                            "Could not list flights on this pair: rate "
+                            "limited twice"],
+                        "turbulence": {
+                            "reading": "light",
+                            "observed": {"reading": "light", "count": 2},
+                            "forecast": {"reading": "unresolved", "count": 0},
+                            "disagree": False}},
+            "corridors": [], "overlaps": [],
+            "fix_cache": {"before": 461, "after": 461, "by_type": {}},
+        }
+        beats = narrate(payload)
+        degraded = [b for b in beats if "data source failed" in b["text"]]
+        assert degraded
+        assert "different thing from a budget running out" in degraded[0]["text"]
+        assert "rate limited" in str(degraded[0]["detail"])

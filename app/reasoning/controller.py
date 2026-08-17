@@ -48,7 +48,17 @@ DEFAULT_BEAM_WIDTH = 2
 DEFAULT_DEPTH_LIMIT = 3
 DEFAULT_CONFIDENCE_THRESHOLD = 0.85
 DEFAULT_MAX_TOOL_CALLS = 12
-DEFAULT_MAX_SECONDS = 25.0
+#: Elapsed-time ceiling for a whole search. Set at 25 seconds when a warm
+#: domestic search took about a second, which turned out to be the wrong
+#: measurement to design against: real AeroAPI latency runs 12 to 25 seconds
+#: for the same search, so the limit was firing on ordinary runs rather than
+#: on stuck ones. A search cut off at depth 1 returns a different corridor
+#: from the same query, which reads as non-determinism even though it is
+#: correctly marked truncated.
+#:
+#: 60 seconds sits well clear of the observed worst case while still
+#: catching a search that has genuinely hung.
+DEFAULT_MAX_SECONDS = 60.0
 
 
 class Stop(str, Enum):

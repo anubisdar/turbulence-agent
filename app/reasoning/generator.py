@@ -35,6 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Sequence
 
+from app.logging_setup import get_logger, kv
 from app.reasoning.controller import Budget
 from app.reasoning.critic import (
     Corridor,
@@ -72,6 +73,20 @@ MIN_CRUISE_ALTITUDE_FT = 10000
 #: choose between - so it stays unused until the weather layer lands, rather
 #: than inventing branches that differ only cosmetically.
 MAX_USEFUL_DEPTH = 2
+
+log = get_logger("generator")
+
+#: Phrases in a note that mean a data source failed rather than a corridor
+#: being judged. A search missing its sources produced a partial answer for
+#: a different reason than one stopped by a budget, and a reader should be
+#: able to tell them apart.
+#: Matched loosely on purpose. An earlier version listed exact phrases and
+#: missed "could not be fetched" because the list held "could not fetch",
+#: which is the failure mode of matching on wording rather than meaning.
+_DEGRADED_MARKERS = (
+    "could not", "rate limited", "budget exhausted", "is not an airport",
+    "unavailable", "unknown, not clear", "failed",
+)
 
 LatLon = tuple[float, float]
 
@@ -111,6 +126,10 @@ class CorridorGenerator:
     #: Evidence keyed by corridor id, kept so the interface can show which
     #: reports and forecasts produced a reading.
     evidence: dict[str, GatherResult] = field(default_factory=dict)
+    #: Notes recording a source that failed rather than a judgement made.
+    #: A search that lost a data source explored less of the tree, and that
+    #: is a different thing from a search a budget cut short.
+    degraded: list[str] = field(default_factory=list)
 
     # ------------------------------------------------------------ helpers
 
@@ -120,8 +139,22 @@ class CorridorGenerator:
         return corridor_overlap_fn(self.shapes)
 
     def _note(self, text: str) -> None:
-        if text not in self.notes:
-            self.notes.append(text)
+        """Record a note, and log it.
+
+        Notes explain why a corridor could not be built, and until now they
+        reached the response and the screen but never the log. Three
+        separate investigations stalled on exactly this: a thin search whose
+        cause was written down but not recorded anywhere durable.
+        """
+        if text in self.notes:
+            return
+        self.notes.append(text)
+        lowered = text.lower()
+        if any(marker in lowered for marker in _DEGRADED_MARKERS):
+            self.degraded.append(text)
+            log.warning("generator degraded " + kv(note=text))
+        else:
+            log.info("generator " + kv(note=text))
 
     def _endpoints(self, budget: Budget | None = None
                    ) -> tuple[LatLon, LatLon] | None:

@@ -290,6 +290,17 @@ def narrate(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "the agent says so rather than presenting it as final.",
             kind="caution", pause=BEAT))
 
+    if out.get("degraded"):
+        reasons = out.get("degraded_reasons") or []
+        beats.append(_beat(
+            CONTROLLER, "Guardrail",
+            "A data source failed during this search, so fewer corridors "
+            "were built than usual. The answer below rests on what could be "
+            "reached, not on everything the agent would normally consider. "
+            "This is a different thing from a budget running out.",
+            reasons[0] if reasons else None,
+            kind="caution", pause=BEAT_LONG))
+
     # ---------------------------------------------------------- verdict
     if out.get("winner"):
         beats.append(_beat(

@@ -185,6 +185,7 @@ class SearchRequest:
     depth_limit: int = 2
     confidence_threshold: float = 0.85
     max_tool_calls: int = 8
+    max_seconds: float = 60.0
     width_nm: float = 25.0
     use_graph: bool = False
     use_fixtures: bool = False
@@ -433,7 +434,8 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
             beam_width=req.beam_width,
             depth_limit=req.depth_limit,
             confidence_threshold=req.confidence_threshold,
-            budget=Budget(max_tool_calls=req.max_tool_calls),
+            budget=Budget(max_tool_calls=req.max_tool_calls,
+                          max_seconds=req.max_seconds),
             overlap_fn=generator.overlap_fn,
             # Survivors only: see controller.search. A corridor about to be
             # pruned by dominance should not cost a weather fetch.
@@ -457,7 +459,8 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
                 "origin": req.origin.upper(), "dest": req.dest.upper(),
                 "beam_width": req.beam_width, "depth_limit": req.depth_limit,
                 "confidence_threshold": req.confidence_threshold,
-                "max_tool_calls": req.max_tool_calls, "width_nm": req.width_nm,
+                "max_tool_calls": req.max_tool_calls,
+                "max_seconds": req.max_seconds, "width_nm": req.width_nm,
                 "controller": "langgraph" if req.use_graph else "plain",
                 "source": "fixtures" if req.use_fixtures else "live",
                 "departure_date": req.departure_date,
@@ -480,6 +483,12 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
                 "reading": result.reading.value,
                 "survivors": [c.id for c in result.survivors],
                 "turbulence": _turbulence_summary(result, generator),
+                # Distinct from `truncated`. A truncated search was stopped
+                # by a budget; a degraded one lost a data source and
+                # explored less of the tree as a result. Both produce a
+                # partial answer, for different reasons.
+                "degraded": bool(generator.degraded),
+                "degraded_reasons": list(generator.degraded),
             },
             "corridors": [
                 {"id": cid, **values} for cid, values in meta.items()
@@ -514,6 +523,11 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
                         + kv(stop=result.stop.value,
                              calls=result.calls_used,
                              cap=req.max_tool_calls))
+        if generator.degraded:
+            log.warning("search degraded by a failing data source "
+                        + kv(failures=len(generator.degraded),
+                             nodes=result.nodes_generated,
+                             first=generator.degraded[0]))
         if result.reading.value == "unresolved":
             log.info("no turbulence reading established "
                      + kv(observed=(payload["outcome"]["turbulence"] or {})

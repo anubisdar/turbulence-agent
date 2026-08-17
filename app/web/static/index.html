@@ -636,6 +636,9 @@ function renderVerdict(data){
       ${o.truncated ? `<div class="why" style="margin-top:12px">Stopped on a budget
         (${esc(o.stop)}), not on confidence. This is the best of what was explored,
         not the best available.</div>` : ''}
+      ${o.degraded ? `<div class="why" style="margin-top:12px">A data source
+        failed during this search, so fewer corridors were built than usual.
+        ${esc((o.degraded_reasons || [])[0] || '')}</div>` : ''}
     </div>`;
 }
 
