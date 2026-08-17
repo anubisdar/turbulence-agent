@@ -41,6 +41,7 @@ PAIR_FLIGHTS = {"flights": [
         "actual_off": "2026-08-09T09:00:00Z",
         "route": "EWC JHW Q82 PONCT JFUND2",
         "route_distance": 495, "filed_altitude": 330,
+        "origin": {"code": "KPIT"}, "destination": {"code": "KBOS"},
     }]},
     {"segments": [{"ident": "NOID", "status": "Cancelled"}]},   # no fa_flight_id
 ]}
@@ -275,3 +276,71 @@ class TestCallAccounting:
         c = client({"/flights/to/KBOS": PAIR_FLIGHTS})
         c.flights_between("KPIT", "KBOS")
         assert c.call_log == ["/airports/KPIT/flights/to/KBOS"]
+
+
+
+CONNECTION = {"flights": [
+    # The real shape of a KSAN to RJTT query: no nonstop exists, so every
+    # itinerary connects. Flattening these into one pool and picking by
+    # departure time returns a regional feeder leg as the reference flight.
+    {"segments": [
+        {"ident": "SKW4002", "fa_flight_id": "skw-1", "aircraft_type": "E75L",
+         "actual_off": "2026-08-16T22:48:35Z",
+         "origin": {"code": "KSAN"}, "destination": {"code": "KLAX"}},
+        {"ident": "ANA125", "fa_flight_id": "ana-1", "aircraft_type": "B789",
+         "actual_off": "2026-08-17T00:42:55Z",
+         "origin": {"code": "KLAX"}, "destination": {"code": "RJTT"}},
+    ]},
+    {"segments": [
+        {"ident": "DAL2508", "fa_flight_id": "dal-1", "aircraft_type": "B738",
+         "actual_off": "2026-08-16T18:25:39Z",
+         "origin": {"code": "KSAN"}, "destination": {"code": "KSEA"}},
+        {"ident": "ANA117", "fa_flight_id": "ana-2", "aircraft_type": "B789",
+         "actual_off": "2026-08-17T00:16:09Z",
+         "origin": {"code": "KSEA"}, "destination": {"code": "RJTT"}},
+    ]},
+]}
+
+
+class TestNonstopFiltering:
+    """An itinerary can be a connection. Picking any segment by departure
+    time returned a Dash 8 turboprop as the reference flight for Seattle to
+    Tokyo, and a filed route that started at Los Angeles for a search from
+    San Diego."""
+
+    def test_connecting_segments_are_excluded(self):
+        c = client({"/flights/to/RJTT": CONNECTION})
+        assert c.flights_between("KSAN", "RJTT") == []
+
+    def test_a_pair_with_no_nonstop_returns_nothing(self):
+        """The honest answer. Returning someone else's flight is worse."""
+        c = client({"/flights/to/RJTT": CONNECTION})
+        assert c.most_recently_flown("KSAN", "RJTT") is None
+
+    def test_a_genuine_nonstop_survives(self):
+        payload = {"flights": [{"segments": [
+            {"ident": "NH106", "fa_flight_id": "nh-1", "aircraft_type": "B77W",
+             "actual_off": "2026-08-16T20:00:00Z",
+             "origin": {"code": "KSAN"}, "destination": {"code": "RJTT"}}]}]}
+        c = client({"/flights/to/RJTT": payload})
+        assert [s.ident for s in c.flights_between("KSAN", "RJTT")] == ["NH106"]
+
+    def test_the_middle_leg_of_a_connection_is_not_taken(self):
+        """ANA125 flies to Tokyo but departs from Los Angeles."""
+        c = client({"/flights/to/RJTT": CONNECTION})
+        assert "ANA125" not in [s.ident
+                                for s in c.flights_between("KSAN", "RJTT")]
+
+    def test_connections_are_available_when_asked_for(self):
+        c = client({"/flights/to/RJTT": CONNECTION})
+        idents = [s.ident for s in
+                  c.flights_between("KSAN", "RJTT", nonstop_only=False)]
+        assert "ANA125" in idents
+
+    def test_matching_is_case_insensitive(self):
+        payload = {"flights": [{"segments": [
+            {"ident": "NH106", "fa_flight_id": "nh-1", "aircraft_type": "B77W",
+             "actual_off": "2026-08-16T20:00:00Z",
+             "origin": {"code": "ksan"}, "destination": {"code": "rjtt"}}]}]}
+        c = client({"/flights/to/RJTT": payload})
+        assert len(c.flights_between("KSAN", "RJTT")) == 1

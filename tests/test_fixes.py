@@ -81,8 +81,17 @@ class TestClassification:
                 assert classify(t) is not TokenKind.UNKNOWN, t
 
     def test_garbage_is_unknown(self):
-        assert classify("4030N08015W") is TokenKind.UNKNOWN
         assert classify("") is TokenKind.UNKNOWN
+        assert classify("!!!") is TokenKind.UNKNOWN
+        assert classify("12345678") is TokenKind.UNKNOWN
+
+    def test_a_slashless_oceanic_token_is_still_a_position(self):
+        """`4030N08015W` was written into an earlier test as an example of
+        garbage. It is a real oceanic waypoint with the slash omitted, which
+        is the form some flight plans use."""
+        from app.sources.fixes import TokenKind, parse_oceanic
+        assert classify("4030N08015W") is TokenKind.OCEANIC
+        assert parse_oceanic("4030N08015W") == pytest.approx((40.5, -80.25))
 
 
 class TestTokenize:
@@ -224,3 +233,85 @@ class TestTypeNormalisation:
             {"name": "B", "latitude": 2, "longitude": 2, "type": "WAYPOINT"},
         ])
         assert cache_stats(db)["by_type"] == {"Waypoint": 2}
+
+
+class TestOceanicWaypoints:
+    """Over water there is nothing to name a fix after, so routes carry the
+    coordinates in the token. These were classified UNKNOWN and discarded,
+    which is why every transpacific routing failed to resolve."""
+
+    @pytest.mark.parametrize("token,expected", [
+        ("5700N/15000W", (57.0, -150.0)),
+        ("3600N/15000E", (36.0, 150.0)),
+        ("5000N/17000E", (50.0, 170.0)),
+        ("4800N/18000E", (48.0, 180.0)),
+        ("5100N/14000W", (51.0, -140.0)),
+        ("3000S/06000W", (-30.0, -60.0)),
+    ])
+    def test_real_tokens_parse(self, token, expected):
+        from app.sources.fixes import parse_oceanic
+        assert parse_oceanic(token) == pytest.approx(expected)
+
+    def test_minutes_are_the_last_two_digits(self):
+        """`5230N` is 52 degrees 30 minutes, which is 52.5."""
+        from app.sources.fixes import parse_oceanic
+        lat, lon = parse_oceanic("5230N/04030W")
+        assert lat == pytest.approx(52.5)
+        assert lon == pytest.approx(-40.5)
+
+    def test_they_are_classified_as_oceanic(self):
+        from app.sources.fixes import TokenKind
+        assert classify("5700N/15000W") is TokenKind.OCEANIC
+        assert classify("5700N/15000W") is not TokenKind.UNKNOWN
+
+    def test_an_oceanic_route_designator_is_not_a_point(self):
+        """`OTR13` names a route, not a position."""
+        from app.sources.fixes import TokenKind, parse_oceanic
+        assert classify("OTR13") is not TokenKind.OCEANIC
+        assert parse_oceanic("OTR13") is None
+
+    def test_impossible_coordinates_are_rejected(self):
+        from app.sources.fixes import parse_oceanic
+        assert parse_oceanic("9900N/15000W") is None      # latitude > 90
+        assert parse_oceanic("5700N/19000W") is None      # longitude > 180
+
+    def test_they_need_no_cache_lookup(self, db):
+        """The position is in the token, so nothing can be missing."""
+        res = resolve_route(db, "5100N/14000W 5400N/15000W")
+        assert res.missing == []
+        assert len(res.points) == 2
+
+    def test_a_transpacific_route_resolves(self, db):
+        upsert_fixes(db, [
+            {"name": "KSEA", "latitude": 47.4502, "longitude": -122.3088,
+             "type": "Airport"},
+            {"name": "RJTT", "latitude": 35.5533, "longitude": 139.7811,
+             "type": "Airport"},
+            {"name": "NATES", "latitude": 52.0, "longitude": -160.0,
+             "type": "Fix"},
+        ])
+        res = resolve_route(
+            db, "KSEA BANGR9 NATES 5100N/14000W 5400N/15000W J523 RJTT")
+        assert res.resolved
+        assert res.coverage == 1.0
+
+    def test_order_is_preserved_around_them(self, db):
+        """An oceanic point sits between named fixes, not after them."""
+        upsert_fixes(db, [
+            {"name": "KSEA", "latitude": 47.4502, "longitude": -122.3088,
+             "type": "Airport"},
+            {"name": "RJTT", "latitude": 35.5533, "longitude": 139.7811,
+             "type": "Airport"},
+        ])
+        res = resolve_route(db, "KSEA 5100N/14000W RJTT")
+        assert [p[0] for p in res.points] == ["KSEA", "5100N/14000W", "RJTT"]
+
+    def test_resolution_is_reported(self, db):
+        res = resolve_route(db, "5100N/14000W 5400N/15000W")
+        assert any("oceanic waypoint" in n for n in res.notes())
+
+    def test_a_domestic_route_is_unaffected(self, db):
+        upsert_fixes(db, SAMPLE_FIXES)
+        res = resolve_route(db, "EWC WOMBT TOSTR PONCT JFUND2")
+        assert res.resolved
+        assert res.oceanic_points == []

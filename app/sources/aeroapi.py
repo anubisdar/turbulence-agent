@@ -87,6 +87,19 @@ class FlightSegment:
 
 
 @dataclass(frozen=True)
+class Airport:
+    """Enough of an airport to anchor a corridor."""
+    code: str
+    latitude: float
+    longitude: float
+    name: str | None = None
+
+    def as_cache_row(self) -> dict:
+        return {"name": self.code, "latitude": self.latitude,
+                "longitude": self.longitude, "type": "Airport"}
+
+
+@dataclass(frozen=True)
 class RouteFix:
     name: str
     latitude: float
@@ -209,15 +222,38 @@ class AeroAPIClient:
     # -------------------------------------------------------------- endpoints
 
     def flights_between(self, origin: str, dest: str,
-                        max_pages: int = 1) -> list[FlightSegment]:
-        """Flights on an airport pair, flattened out of their itineraries."""
+                        max_pages: int = 1,
+                        nonstop_only: bool = True) -> list[FlightSegment]:
+        """Flights on an airport pair, flattened out of their itineraries.
+
+        NONSTOP ONLY, BY DEFAULT. This endpoint returns itineraries, and an
+        itinerary can be a connection: a San Diego to Tokyo query comes back
+        as KSAN to KLAX followed by KLAX to RJTT. Flattening every segment
+        into one pool and picking by departure time means the reference
+        flight can be a regional feeder leg on a different aircraft between
+        two different airports, which is exactly what happened - a Dash 8
+        turboprop was returned as the reference for Seattle to Tokyo.
+
+        Filtering to segments that actually fly the requested pair means a
+        pair with no nonstop service returns nothing, which is the honest
+        answer. The caller reports that rather than describing someone
+        else's flight.
+        """
         body = self.request(f"/airports/{origin}/flights/to/{dest}",
                             {"max_pages": max_pages})
+        origin, dest = origin.upper(), dest.upper()
         out: list[FlightSegment] = []
         for itinerary in body.get("flights") or []:
             for seg in itinerary.get("segments") or []:
                 if not seg.get("fa_flight_id"):
                     continue
+                if nonstop_only:
+                    seg_origin = (seg.get("origin") or {}).get("code", "")
+                    seg_dest = (seg.get("destination") or {}).get("code", "")
+                    if (seg_origin or "").upper() != origin:
+                        continue
+                    if (seg_dest or "").upper() != dest:
+                        continue
                 out.append(FlightSegment(
                     ident=seg.get("ident") or "",
                     fa_flight_id=seg["fa_flight_id"],
@@ -285,6 +321,25 @@ class AeroAPIClient:
                 update_type=p.get("update_type"),
             ))
         return out
+
+    def airport(self, code: str) -> Airport | None:
+        """Look up an airport's position directly.
+
+        The fix cache normally learns airports from filed routes, since
+        AeroAPI returns the origin and destination as route fixes. That
+        breaks on a pair nobody has filed a usable route for, which leaves
+        even the great-circle corridor unbuildable. This is the fallback
+        that makes the geometric source genuinely unconditional.
+        """
+        code = (code or "").strip().upper()
+        if not code:
+            return None
+        body = self.request(f"/airports/{code}")
+        lat, lon = body.get("latitude"), body.get("longitude")
+        if lat is None or lon is None:
+            return None
+        return Airport(code=code, latitude=float(lat), longitude=float(lon),
+                       name=body.get("name"))
 
     def alternate_routings(self, origin: str, dest: str
                            ) -> list[AlternateRouting]:

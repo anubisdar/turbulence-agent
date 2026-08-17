@@ -36,7 +36,8 @@ def fixture_dir(tmp_path_factory):
             "status": "Arrived / Delayed", "aircraft_type": "E75S",
             "actual_off": "2026-08-09T10:00:00Z",
             "route": "TYROO PSB J49 HNK PONCT JFUND2",
-            "route_distance": 495, "filed_altitude": 310}]},
+            "route_distance": 495, "filed_altitude": 310,
+            "origin": {"code": "KPIT"}, "destination": {"code": "KBOS"}}]},
     ]}))
 
     (d / "flight_route.json").write_text(json.dumps({"fixes": [
@@ -664,3 +665,48 @@ class TestExplainerNarration:
                                        "source": "deterministic",
                                        "rejected": []}))
         assert not [b for b in beats if b["concept"] == "Explanation"]
+
+
+class TestGeoJsonAcrossTheDateLine:
+    """The geometry can be right and the picture still wrong. A corridor
+    stepping from 179 to -179 reads to a map library as a 358 degree move,
+    and it draws the line back across the whole world."""
+
+    def _corridor(self, a, b):
+        from app.reasoning.geometry import build_corridor, great_circle
+        return build_corridor(great_circle(a, b, 24))
+
+    KSEA = (47.4502, -122.3088)
+    RJTT = (35.5533, 139.7811)
+
+    def test_the_centreline_is_continuous(self):
+        from app.web.service import _path_to_geojson
+        lons = [c[0] for c in
+                _path_to_geojson(self._corridor(self.KSEA, self.RJTT))]
+        steps = [abs(b - a) for a, b in zip(lons, lons[1:])]
+        assert max(steps) < 180, "a step near 360 draws the wrong way round"
+
+    def test_the_ring_is_continuous(self):
+        from app.web.service import _ring_to_geojson
+        lons = [c[0] for c in
+                _ring_to_geojson(self._corridor(self.KSEA, self.RJTT))]
+        steps = [abs(b - a) for a, b in zip(lons, lons[1:])]
+        assert max(steps) < 180
+
+    def test_a_domestic_corridor_is_unchanged(self):
+        """The fix must not move anything that already drew correctly."""
+        from app.web.service import _path_to_geojson
+        lons = [c[0] for c in _path_to_geojson(
+            self._corridor((40.4914, -80.2327), (42.3629, -71.0064)))]
+        assert all(-85 < lon < -65 for lon in lons)
+
+    def test_latitudes_stay_in_range(self):
+        """Only longitude is unwrapped; latitude has no wrap to handle."""
+        from app.web.service import _path_to_geojson
+        for lon, lat in _path_to_geojson(self._corridor(self.KSEA, self.RJTT)):
+            assert -90 <= lat <= 90
+
+    def test_the_ring_still_closes(self):
+        from app.web.service import _ring_to_geojson
+        ring = _ring_to_geojson(self._corridor(self.KSEA, self.RJTT))
+        assert ring[0] == ring[-1]

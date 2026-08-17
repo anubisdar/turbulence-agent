@@ -63,6 +63,7 @@ CREATE INDEX IF NOT EXISTS idx_fixes_type ON route_fixes(fix_type);
 
 class TokenKind(str, Enum):
     POINT = "point"          # navaid, fix, or airport - has coordinates
+    OCEANIC = "oceanic"      # 5700N/15000W - coordinates in the name itself
     AIRWAY = "airway"        # J49, Q82 - a path between points
     PROCEDURE = "procedure"  # JFUND2, OOSHN5 - SID or STAR
     UNKNOWN = "unknown"      # does not match any known shape
@@ -72,6 +73,23 @@ _AIRWAY = re.compile(r"^[A-Z]\d{1,3}$")
 _PROCEDURE = re.compile(r"^[A-Z]{3,5}\d$")
 _AIRPORT = re.compile(r"^[A-Z]{4}$")
 _FIX = re.compile(r"^[A-Z]{2,5}$")
+
+#: Oceanic waypoints carry their own position. Over water there is nothing to
+#: name a fix after, so routes use the coordinates directly:
+#:
+#:     5700N/15000W   57 degrees north, 150 degrees west
+#:     3600N/15000E   36 north, 150 east
+#:     5230N/04000W   52 degrees 30 minutes north, 40 west
+#:
+#: Degrees and minutes are packed without a separator: the last two digits of
+#: each group are minutes. Latitude is always four digits, longitude five,
+#: which is what distinguishes them.
+#:
+#: These were classified as UNKNOWN and discarded, which is why every
+#: transpacific routing failed to resolve. They need no cache lookup at all -
+#: the position is in the token.
+_OCEANIC = re.compile(
+    r"^(\d{2})(\d{2})([NS])/?(\d{3})(\d{2})([EW])$")
 
 
 def classify(token: str) -> TokenKind:
@@ -83,9 +101,32 @@ def classify(token: str) -> TokenKind:
         return TokenKind.AIRWAY
     if _PROCEDURE.match(t):
         return TokenKind.PROCEDURE
+    if _OCEANIC.match(t):
+        return TokenKind.OCEANIC
     if _AIRPORT.match(t) or _FIX.match(t):
         return TokenKind.POINT
     return TokenKind.UNKNOWN
+
+
+def parse_oceanic(token: str) -> tuple[float, float] | None:
+    """`5700N/15000W` to (57.0, -150.0).
+
+    Returns (lat, lon), the ordering used throughout this project. Minutes
+    are the last two digits of each group, so `5230N` is 52.5 degrees.
+    """
+    match = _OCEANIC.match((token or "").strip().upper())
+    if not match:
+        return None
+    lat_deg, lat_min, ns, lon_deg, lon_min, ew = match.groups()
+    lat = int(lat_deg) + int(lat_min) / 60.0
+    lon = int(lon_deg) + int(lon_min) / 60.0
+    if ns == "S":
+        lat = -lat
+    if ew == "W":
+        lon = -lon
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+    return (round(lat, 4), round(lon, 4))
 
 
 def tokenize(route: str) -> list[str]:
@@ -203,6 +244,8 @@ class RouteResolution:
     route: str
     points: list[tuple[str, float, float]] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
+    #: Oceanic waypoints resolved from their own names, needing no cache.
+    oceanic_points: list[str] = field(default_factory=list)
     airways_dropped: list[str] = field(default_factory=list)
     procedures_dropped: list[str] = field(default_factory=list)
     unknown_tokens: list[str] = field(default_factory=list)
@@ -238,6 +281,12 @@ class RouteResolution:
                 f"{', '.join(sorted(set(self.procedures_dropped)))} dropped; "
                 f"they manoeuvre near airports already used as endpoints."
             )
+        if self.oceanic_points:
+            out.append(
+                f"{len(self.oceanic_points)} oceanic waypoint(s) resolved "
+                f"from their own coordinates, which need no lookup: "
+                f"{', '.join(self.oceanic_points[:4])}."
+            )
         if self.unknown_tokens:
             out.append(
                 f"Unrecognised route token(s): "
@@ -253,6 +302,9 @@ def resolve_route(conn: sqlite3.Connection, route: str) -> RouteResolution:
     if not tokens:
         return res
 
+    # Sequence, not set: a route is ordered, and an oceanic point sits
+    # between named fixes rather than after them.
+    ordered: list[tuple[str, tuple[float, float] | None]] = []
     point_names: list[str] = []
     for t in tokens:
         kind = classify(t)
@@ -260,16 +312,28 @@ def resolve_route(conn: sqlite3.Connection, route: str) -> RouteResolution:
             res.airways_dropped.append(t)
         elif kind is TokenKind.PROCEDURE:
             res.procedures_dropped.append(t)
+        elif kind is TokenKind.OCEANIC:
+            # The position is in the token, so no cache lookup is needed and
+            # none can fail.
+            position = parse_oceanic(t)
+            if position:
+                ordered.append((t, position))
+                res.oceanic_points.append(t)
+            else:
+                res.unknown_tokens.append(t)
         elif kind is TokenKind.POINT:
+            ordered.append((t, None))
             point_names.append(t)
         else:
             res.unknown_tokens.append(t)
 
     found, missing = lookup(conn, point_names)
     res.missing = missing
-    # Order matters: the route is a sequence, not a set.
     seen: set[str] = set()
-    for name in point_names:
+    for name, position in ordered:
+        if position is not None:
+            res.points.append((name, position[0], position[1]))
+            continue
         if name in found and name not in seen:
             seen.add(name)
             lat, lon = found[name]

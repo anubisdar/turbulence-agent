@@ -123,16 +123,55 @@ class CorridorGenerator:
         if text not in self.notes:
             self.notes.append(text)
 
-    def _endpoints(self) -> tuple[LatLon, LatLon] | None:
-        """Airport coordinates, from the constructor or the fix cache.
+    def _endpoints(self, budget: Budget | None = None
+                   ) -> tuple[LatLon, LatLon] | None:
+        """Airport coordinates, from the constructor, the cache, or a lookup.
 
-        The cache is populated by any prior filed-route call, since AeroAPI
-        returns the origin and destination airports as route fixes.
+        The cache normally learns airports from filed routes, since AeroAPI
+        returns the origin and destination as route fixes. That fails on a
+        pair where no usable route comes back - a wrong reference flight, an
+        unparseable route string, an airport nobody files through - and it
+        took the great-circle corridor down with it. The geometric source
+        needs no external data to compute, so it should not be the source
+        that fails first.
+
+        The direct lookup costs one call per unknown airport, once, and the
+        result is cached permanently.
         """
         if self.origin_latlon and self.dest_latlon:
             return self.origin_latlon, self.dest_latlon
+
         found, missing = _lookup(self.conn, [self.origin, self.dest])
-        if missing:
+        if not missing:
+            return found[self.origin], found[self.dest]
+
+        if budget is None:
+            return None
+
+        for code in list(missing):
+            if not budget.spend():
+                self._note(
+                    f"Tool budget exhausted before {code} could be located, "
+                    f"so no corridor could be built."
+                )
+                return None
+            try:
+                airport = self.client.airport(code)
+            except AeroAPIError as e:
+                self._note(f"Could not look up {code}: {e}")
+                return None
+            if airport is None:
+                self._note(
+                    f"{code} is not an airport AeroAPI recognises, so no "
+                    f"corridor could be built for this trip."
+                )
+                return None
+            upsert_fixes(self.conn, [airport.as_cache_row()],
+                         source="AeroAPI /airports")
+            self._note(f"Located {code} directly and cached it.")
+
+        found, still_missing = _lookup(self.conn, [self.origin, self.dest])
+        if still_missing:
             return None
         return found[self.origin], found[self.dest]
 
@@ -195,12 +234,26 @@ class CorridorGenerator:
                 f"recent. Morning and evening departures fly different air."
             )
         if self._flight is None:
-            self._note(
-                f"No flight on {self.origin}-{self.dest} has departed within "
-                f"the available window, so no flown track or filed route is "
-                f"available. Corridors from those sources are absent, which "
-                f"is not the same as their being smooth."
-            )
+            if not self._segments:
+                # Distinct from "nothing has departed lately". A pair with no
+                # nonstop service has no route to describe at all, and the
+                # great circle that follows is a geometric line rather than a
+                # path anyone flies.
+                self._note(
+                    f"No nonstop flights operate between {self.origin} and "
+                    f"{self.dest}. Every itinerary on this pair connects "
+                    f"through another airport, so there is no single flown "
+                    f"route to examine. Any corridor shown is the geometric "
+                    f"shortest path, not a route an aircraft takes."
+                )
+            else:
+                self._note(
+                    f"No nonstop flight on {self.origin}-{self.dest} has "
+                    f"departed within the available window, so no flown track "
+                    f"or filed route is available. Corridors from those "
+                    f"sources are absent, which is not the same as their "
+                    f"being smooth."
+                )
         return self._flight
 
     # ------------------------------------------------------------ depth 1
@@ -476,7 +529,7 @@ class CorridorGenerator:
             # that baseline, so it has to exist before any corridor is built.
             filed_fixes = self._fetch_filed_route(budget)
 
-            endpoints = self._endpoints()
+            endpoints = self._endpoints(budget)
             if endpoints is None:
                 self._note(
                     f"Airport coordinates for {self.origin}/{self.dest} could "

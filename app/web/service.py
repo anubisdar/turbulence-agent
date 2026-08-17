@@ -35,7 +35,11 @@ from app.logging_setup import get_logger, kv, request_context, trip_fields
 from app.reasoning.controller import Budget, SearchResult, search
 from app.reasoning.critic import Corridor
 from app.reasoning.generator import CorridorGenerator
-from app.reasoning.geometry import CorridorShape, overlap_fraction
+from app.reasoning.geometry import (
+    CorridorShape,
+    overlap_fraction,
+    unwrap_longitudes,
+)
 from app.reasoning.graph import search_graph
 from app.retrieval.schema import connect
 from app.sources.aeroapi import AeroAPIClient
@@ -119,20 +123,33 @@ class FixtureTransport:
 # ------------------------------------------------------------------ geojson
 
 
-def _ring_to_geojson(shape: CorridorShape) -> list[list[float]]:
-    """Corridor outline as GeoJSON [lon, lat] pairs.
+def _unwrapped(points: list[tuple[float, float]]) -> list[list[float]]:
+    """(lat, lon) pairs to GeoJSON [lon, lat], continuous across the date line.
 
     Everywhere else in this project a point is (lat, lon). GeoJSON reverses
-    it. This is the only place that flip happens.
+    it, so this is the only place that flip happens.
+
+    Longitudes are also unwrapped. A Seattle to Tokyo corridor steps from
+    179 to -179, and a map library reads that as a 358 degree move: it draws
+    the line back across the whole world rather than continuing across the
+    edge. Emitting 181 instead of -179 keeps the path continuous, and
+    Leaflet wraps out-of-range longitudes itself when drawing.
     """
-    ring = [[lon, lat] for lat, lon in shape.boundary_latlon()]
+    if not points:
+        return []
+    lons = unwrap_longitudes([lon for _, lon in points])
+    return [[lon, lat] for (lat, _), lon in zip(points, lons)]
+
+
+def _ring_to_geojson(shape: CorridorShape) -> list[list[float]]:
+    ring = _unwrapped(shape.boundary_latlon())
     if ring and ring[0] != ring[-1]:
         ring.append(ring[0])
     return ring
 
 
 def _path_to_geojson(shape: CorridorShape) -> list[list[float]]:
-    return [[lon, lat] for lat, lon in shape.points]
+    return _unwrapped(shape.points)
 
 
 def corridor_features(shapes: dict[str, CorridorShape],

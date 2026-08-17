@@ -248,3 +248,72 @@ class TestSimplify:
         a = build_corridor(dense, simplify_nm=None)
         b = build_corridor(dense, simplify_nm=2.0)
         assert overlap_fraction(a, b) > 0.95
+
+
+KSEA = (47.4502, -122.3088)
+RJTT = (35.5533, 139.7811)
+
+
+class TestAntimeridian:
+    """A Seattle to Tokyo route runs -122, -130, ... 179, -179, ... 140.
+    Averaging that raw puts the projection's centre near West Africa, and
+    the corridor gets drawn eastward across three continents instead of
+    northwest over the Aleutians."""
+
+    @pytest.fixture
+    def transpacific(self):
+        return great_circle(KSEA, RJTT, 24)
+
+    def test_the_route_is_detected_as_crossing(self, transpacific):
+        from app.reasoning.geometry import crosses_antimeridian
+        assert crosses_antimeridian(transpacific)
+        assert not crosses_antimeridian(great_circle(KPIT, KBOS, 24))
+
+    def test_longitudes_unwrap_continuously(self):
+        from app.reasoning.geometry import unwrap_longitudes
+        wrapped = [170.0, 175.0, 179.0, -178.0, -173.0]
+        unwrapped = unwrap_longitudes(wrapped)
+        steps = [abs(b - a) for a, b in zip(unwrapped, unwrapped[1:])]
+        assert all(s < 180 for s in steps)
+        assert unwrapped[-1] > 180
+
+    def test_normalisation_returns_a_legal_longitude(self):
+        from app.reasoning.geometry import normalize_longitude
+        assert normalize_longitude(187.0) == pytest.approx(-173.0)
+        assert normalize_longitude(-190.0) == pytest.approx(170.0)
+        assert normalize_longitude(-122.0) == pytest.approx(-122.0)
+
+    def test_the_midpoint_lands_in_the_pacific(self, transpacific):
+        """Not off West Africa, which is what the raw average gives."""
+        from app.reasoning.geometry import midpoint
+        lat, lon = midpoint(transpacific)
+        assert abs(lon) > 150, "the centre should be near the date line"
+        assert 30 < lat < 60
+
+    def test_the_geodesic_length_is_right(self, transpacific):
+        """Seattle to Tokyo is about 4,100 nm, not 15,000."""
+        assert path_length_nm(transpacific) == pytest.approx(4174, abs=50)
+
+    def test_the_corridor_area_matches_its_dimensions(self, transpacific):
+        """A 4,174 nm path buffered 25 nm each side is roughly 210,000 nm2.
+        The broken projection gave 296,672."""
+        corridor = build_corridor(transpacific)
+        assert corridor.area_nm2() == pytest.approx(210_000, rel=0.05)
+
+    def test_the_corridor_does_not_wrap_the_wrong_way(self, transpacific):
+        """The clearest symptom: a band across Europe."""
+        corridor = build_corridor(transpacific)
+        assert not corridor.contains(51.5, -0.1), "London is not en route"
+        assert not corridor.contains(40.7, -74.0), "New York is not en route"
+        assert not corridor.contains(55.7, 37.6), "Moscow is not en route"
+
+    def test_points_along_the_route_are_inside(self, transpacific):
+        corridor = build_corridor(transpacific)
+        for point in transpacific[2:-2]:
+            assert corridor.contains(*point)
+
+    def test_a_us_route_is_unaffected(self):
+        """The fix must not move anything that already worked."""
+        corridor = build_corridor(great_circle(KPIT, KBOS, 24))
+        assert corridor.length_nm == pytest.approx(431, abs=3)
+        assert corridor.contains(*great_circle(KPIT, KBOS, 24)[12])

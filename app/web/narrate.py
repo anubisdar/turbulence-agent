@@ -298,7 +298,18 @@ def narrate(payload: dict[str, Any]) -> list[dict[str, Any]]:
             f"likely to fly.", pause=BEAT))
 
     reading = out.get("reading")
-    if reading == "unresolved":
+    if reading == "unresolved" and not out.get("winner"):
+        # No corridor at all is a different failure from a corridor with no
+        # weather. Saying "the agent found the corridor" on a run where it
+        # found none contradicts the termination beat two lines above.
+        beats.append(_beat(
+            CRITIC, "Guardrail",
+            "Turbulence reading: unresolved, because no route could be "
+            "established in the first place. With no corridor there is "
+            "nothing to gather evidence along, and the agent reports that "
+            "rather than guessing at a path.",
+            kind="caution", pause=BEAT_LONG))
+    elif reading == "unresolved":
         beats.append(_beat(
             CRITIC, "Guardrail",
             "Turbulence reading: unresolved. The agent found the corridor but "

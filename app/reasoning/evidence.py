@@ -35,7 +35,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable, Protocol, Sequence
 
 from app.reasoning.critic import Evidence, Severity
-from app.reasoning.geometry import CorridorShape, intersects_ring
+from app.reasoning.geometry import (
+    CorridorShape,
+    crosses_antimeridian,
+    intersects_ring,
+    normalize_longitude,
+    unwrap_longitudes,
+)
 from app.sources.gairmet import (
     GairmetClient,
     GairmetFetchError,
@@ -146,6 +152,20 @@ def bounding_box(shape: CorridorShape,
     """
     lats = [p[0] for p in shape.points]
     lons = [p[1] for p in shape.points]
+
+    if crosses_antimeridian(shape.points):
+        # A box from -122 to +139 spans most of the planet rather than the
+        # narrow band the route occupies. Unwrapping gives the true extent,
+        # but the result may exceed 180, and AWC would reject that. A route
+        # crossing the date line is outside the CONUS products anyway, so
+        # the box is clamped and the caller gets an honest empty result
+        # rather than a request for half the world.
+        unwrapped = unwrap_longitudes(lons)
+        lo = normalize_longitude(min(unwrapped) - pad_deg)
+        hi = normalize_longitude(max(unwrapped) + pad_deg)
+        return (min(lats) - pad_deg, min(lo, hi),
+                max(lats) + pad_deg, max(lo, hi))
+
     return (min(lats) - pad_deg, min(lons) - pad_deg,
             max(lats) + pad_deg, max(lons) + pad_deg)
 

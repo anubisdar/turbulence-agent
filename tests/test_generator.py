@@ -26,11 +26,15 @@ PAIR = {"flights": [
                    "status": "Arrived", "aircraft_type": "BCS3",
                    "actual_off": "2026-08-10T12:52:35Z",
                    "route": "EWC WOMBT TOSTR PONCT JFUND2",
-                   "filed_altitude": 350}]},
+                   "filed_altitude": 350,
+                   "origin": {"code": "KPIT"},
+                   "destination": {"code": "KBOS"}}]},
     {"segments": [{"ident": "RPA5678", "fa_flight_id": "RPA5678-y",
                    "status": "Arrived", "aircraft_type": "E75S",
                    "actual_off": "2026-08-09T10:00:00Z",
-                   "route": ALT_ROUTE, "filed_altitude": 310}]},
+                   "route": ALT_ROUTE, "filed_altitude": 310,
+                   "origin": {"code": "KPIT"},
+                   "destination": {"code": "KBOS"}}]},
 ]}
 
 ROUTE_JBU = {"fixes": [
@@ -194,7 +198,8 @@ class TestDegradedInputs:
     def test_no_departed_flight_leaves_only_geometry_sources(self):
         scheduled_only = {"flights": [{"segments": [
             {"ident": "X", "fa_flight_id": "x-1", "actual_off": None,
-             "route": "EWC PONCT"}]}]}
+             "route": "EWC PONCT", "origin": {"code": "KPIT"},
+             "destination": {"code": "KBOS"}}]}]}
         gen, _ = make_gen({"/flights/to/KBOS": scheduled_only})
         out = gen(None, 1, Budget(max_tool_calls=12))
         assert "track" not in {c.id for c in out}
@@ -443,3 +448,161 @@ class TestEvidenceWiring:
                          enrich=b_gen.gather_for_survivors, **kw)
         assert a.reading is b.reading
         assert a.trace() == b.trace()
+
+
+class TestAirportLookupFallback:
+    """The great-circle corridor needs no external data to compute, so it
+    should not be the source that fails first. It used to depend on airport
+    coordinates arriving via a filed route, which breaks on any pair where
+    no usable route comes back."""
+
+    def _gen_without_cached_airports(self, route="EWC PONCT"):
+        """A pair whose reference flight yields a route with no airports,
+        which is what a wrong or foreign reference flight looks like."""
+        pair = {"flights": [{"segments": [{
+            "ident": "JZA8807", "fa_flight_id": "JZA8807-x",
+            "status": "Arrived", "aircraft_type": "DH8D",
+            "actual_off": "2026-08-16T23:00:00Z",
+            "route": route, "filed_altitude": 240,
+            "origin": {"code": "KSEA"},
+            "destination": {"code": "RJTT"}}]}]}
+        thin_route = {"fixes": [
+            {"name": "EWC", "latitude": 40.7997, "longitude": -80.2144,
+             "type": "VOR"},
+            {"name": "PONCT", "latitude": 42.2, "longitude": -72.9,
+             "type": "Fix"},
+        ]}
+        airports = {
+            "KSEA": {"latitude": 47.4502, "longitude": -122.3088,
+                     "name": "Seattle-Tacoma Intl"},
+            "RJTT": {"latitude": 35.5533, "longitude": 139.7811,
+                     "name": "Tokyo Haneda"},
+        }
+
+        def transport(path, params):
+            if path.endswith("/flights/to/RJTT"):
+                return 200, pair, ""
+            if path.startswith("/flights/JZA8807-x/route"):
+                return 200, thin_route, ""
+            if path.endswith("/track"):
+                return 200, {"positions": []}, ""
+            if path.endswith("/routes/RJTT"):
+                return 200, {"routes": []}, ""
+            for code, body in airports.items():
+                if path == f"/airports/{code}":
+                    return 200, body, ""
+            return 404, None, ""
+
+        import sqlite3
+        from app.sources.aeroapi import AeroAPIClient
+        from app.sources.fixes import init_fixes
+        conn = sqlite3.connect(":memory:")
+        init_fixes(conn)
+        client = AeroAPIClient(api_key="t", transport=transport,
+                               spacing_seconds=0, sleep=lambda s: None)
+        return CorridorGenerator(client=client, conn=conn,
+                                 origin="KSEA", dest="RJTT")
+
+    def test_a_corridor_is_still_produced(self):
+        """The failure this fixes: zero corridors on a pair whose filed
+        route names no airports."""
+        gen = self._gen_without_cached_airports()
+        out = gen(None, 1, Budget(max_tool_calls=12))
+        assert out, "the great circle must survive a useless filed route"
+        assert "gc" in {c.id for c in out}
+
+    def test_the_airports_are_located_and_cached(self):
+        gen = self._gen_without_cached_airports()
+        gen(None, 1, Budget(max_tool_calls=12))
+        names = {r[0] for r in
+                 gen.conn.execute("SELECT name FROM route_fixes")}
+        assert {"KSEA", "RJTT"} <= names
+        assert any("Located" in n for n in gen.notes)
+
+    def test_the_lookup_costs_budget(self):
+        gen = self._gen_without_cached_airports()
+        budget = Budget(max_tool_calls=12)
+        gen(None, 1, budget)
+        assert budget.calls_used >= 2
+
+    def test_a_warm_cache_needs_no_lookup(self):
+        gen = self._gen_without_cached_airports()
+        gen(None, 1, Budget(max_tool_calls=12))
+        first = gen.client.calls_made
+
+        gen2 = self._gen_without_cached_airports()
+        gen2.conn = gen.conn          # reuse the warmed cache
+        gen2(None, 1, Budget(max_tool_calls=12))
+        assert gen2.client.calls_made < first
+
+    def test_an_unknown_airport_fails_with_a_reason(self):
+        gen = self._gen_without_cached_airports()
+        gen.dest = "ZZZZ"
+        out = gen(None, 1, Budget(max_tool_calls=12))
+        assert out == []
+        assert any("ZZZZ" in n for n in gen.notes)
+
+    def test_an_exhausted_budget_does_not_invent_a_position(self):
+        gen = self._gen_without_cached_airports()
+        out = gen(None, 1, Budget(max_tool_calls=2))
+        assert all(c.id != "gc" for c in out)
+
+
+class TestNoNonstopService:
+    """A pair with no nonstop is a different absence from one where nothing
+    has flown lately, and the note should say which."""
+
+    def _gen(self, segments):
+        import sqlite3
+        from app.sources.aeroapi import AeroAPIClient
+        from app.sources.fixes import init_fixes
+        pair = {"flights": [{"segments": segments}]}
+
+        def transport(path, params):
+            if path.endswith("/flights/to/RJTT"):
+                return 200, pair, ""
+            if path == "/airports/KSAN":
+                return 200, {"latitude": 32.7336, "longitude": -117.1897}, ""
+            if path == "/airports/RJTT":
+                return 200, {"latitude": 35.5533, "longitude": 139.7811}, ""
+            if path.endswith("/routes/RJTT"):
+                return 200, {"routes": []}, ""
+            return 404, None, ""
+
+        conn = sqlite3.connect(":memory:")
+        init_fixes(conn)
+        return CorridorGenerator(
+            client=AeroAPIClient(api_key="t", transport=transport,
+                                 spacing_seconds=0, sleep=lambda s: None),
+            conn=conn, origin="KSAN", dest="RJTT")
+
+    CONNECTION = [
+        {"ident": "SKW4002", "fa_flight_id": "s-1", "aircraft_type": "E75L",
+         "actual_off": "2026-08-16T22:48:35Z",
+         "origin": {"code": "KSAN"}, "destination": {"code": "KLAX"}},
+        {"ident": "ANA125", "fa_flight_id": "a-1", "aircraft_type": "B789",
+         "actual_off": "2026-08-17T00:42:55Z",
+         "origin": {"code": "KLAX"}, "destination": {"code": "RJTT"}},
+    ]
+
+    def test_the_absence_of_nonstop_service_is_stated(self):
+        gen = self._gen(self.CONNECTION)
+        gen(None, 1, Budget(max_tool_calls=12))
+        assert any("No nonstop flights operate" in n for n in gen.notes)
+
+    def test_the_geometric_corridor_is_labelled_as_such(self):
+        """A great circle between two airports nobody flies directly is not
+        a route anyone takes, and the note says so."""
+        gen = self._gen(self.CONNECTION)
+        gen(None, 1, Budget(max_tool_calls=12))
+        assert any("not a route an aircraft takes" in n for n in gen.notes)
+
+    def test_no_feeder_leg_becomes_the_reference_flight(self):
+        gen = self._gen(self.CONNECTION)
+        gen(None, 1, Budget(max_tool_calls=12))
+        assert gen._flight is None
+
+    def test_a_great_circle_is_still_offered(self):
+        gen = self._gen(self.CONNECTION)
+        out = gen(None, 1, Budget(max_tool_calls=12))
+        assert "gc" in {c.id for c in out}

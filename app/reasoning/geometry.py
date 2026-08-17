@@ -120,11 +120,53 @@ def max_dogleg_deg(points: list[LatLon],
     return round(worst, 2)
 
 
-def midpoint(points: list[LatLon]) -> LatLon:
-    """Centre of the bounding extent, used to anchor the local projection."""
-    lats = [p[0] for p in points]
+def unwrap_longitudes(lons: list[float]) -> list[float]:
+    """Make a longitude sequence continuous across the antimeridian.
+
+    A path from Seattle to Tokyo runs -122, -130, ... 179, -179, ... 140.
+    Averaging that raw gives a midpoint near West Africa, which anchors the
+    local projection on the wrong side of the planet and produces a corridor
+    drawn the long way round the world.
+
+    Each step is shifted by whole turns so no consecutive pair jumps more
+    than 180 degrees. The result may fall outside -180..180, which is what
+    the caller wants for arithmetic; `normalize_longitude` brings it back.
+    """
+    if not lons:
+        return []
+    out = [lons[0]]
+    for lon in lons[1:]:
+        previous = out[-1]
+        shifted = lon
+        while shifted - previous > 180.0:
+            shifted -= 360.0
+        while shifted - previous < -180.0:
+            shifted += 360.0
+        out.append(shifted)
+    return out
+
+
+def normalize_longitude(lon: float) -> float:
+    """Bring a longitude back into -180..180."""
+    return ((lon + 180.0) % 360.0) - 180.0
+
+
+def crosses_antimeridian(points: list[LatLon]) -> bool:
+    """Does this path step across the date line?"""
     lons = [p[1] for p in points]
-    return ((min(lats) + max(lats)) / 2.0, (min(lons) + max(lons)) / 2.0)
+    return any(abs(b - a) > 180.0 for a, b in zip(lons, lons[1:]))
+
+
+def midpoint(points: list[LatLon]) -> LatLon:
+    """Centre of the bounding extent, used to anchor the local projection.
+
+    Longitudes are unwrapped first, so a transpacific route anchors near the
+    Aleutians rather than near Ghana.
+    """
+    lats = [p[0] for p in points]
+    lons = unwrap_longitudes([p[1] for p in points])
+    return ((min(lats) + max(lats)) / 2.0,
+            normalize_longitude((min(lons) + max(lons)) / 2.0))
 
 
 # ------------------------------------------------------------------ corridor

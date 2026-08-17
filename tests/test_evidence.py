@@ -565,3 +565,28 @@ class TestReadingExplanations:
         res = gather_evidence(shape, gairmet_client=client, when=NOW)
         assert res.summary
         assert "Moderate turbulence" in res.summary
+
+
+class TestBoundingBoxAcrossTheDateLine:
+    """A box from -122 to +139 spans most of the planet rather than the
+    narrow band a Seattle to Tokyo route occupies."""
+
+    @pytest.fixture
+    def transpacific(self):
+        return build_corridor(great_circle((47.4502, -122.3088),
+                                           (35.5533, 139.7811), 24))
+
+    def test_the_box_is_legal(self, transpacific):
+        min_lat, min_lon, max_lat, max_lon = bounding_box(transpacific)
+        assert -90 <= min_lat <= 90 and -90 <= max_lat <= 90
+        assert -180 <= min_lon <= 180 and -180 <= max_lon <= 180
+
+    def test_latitude_still_comes_first(self, transpacific):
+        min_lat, min_lon, max_lat, max_lon = bounding_box(transpacific)
+        assert 30 < min_lat < 60
+        assert min_lat < max_lat
+
+    def test_a_domestic_box_is_unchanged(self, shape):
+        min_lat, min_lon, max_lat, max_lon = bounding_box(shape)
+        assert 38 < min_lat < 42
+        assert -83 < min_lon < -79
