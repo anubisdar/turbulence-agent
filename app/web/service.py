@@ -31,6 +31,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any
 
+from app.logging_setup import get_logger, kv, request_context, trip_fields
 from app.reasoning.controller import Budget, SearchResult, search
 from app.reasoning.critic import Corridor
 from app.reasoning.generator import CorridorGenerator
@@ -39,6 +40,8 @@ from app.reasoning.graph import search_graph
 from app.retrieval.schema import connect
 from app.sources.aeroapi import AeroAPIClient
 from app.sources.fixes import cache_stats, init_fixes
+
+log = get_logger("service")
 
 DEFAULT_DB = "data/retrieval.db"
 FIXTURE_DIR = Path("data/aeroapi_probe")
@@ -368,7 +371,27 @@ def _overlaps(shapes: dict[str, CorridorShape]) -> list[dict]:
 
 def run_corridor_search(req: SearchRequest, api_key: str | None,
                         db_path: str = DEFAULT_DB) -> dict[str, Any]:
-    """Run the search and shape it for a map. No search logic lives here."""
+    """Run the search and shape it for a map. No search logic lives here.
+
+    Everything a search touches logs under one request id, so the generator,
+    the critic, the controller and the explainer can be read as one story
+    rather than as interleaved fragments.
+    """
+    with request_context() as request_id:
+        return _run_corridor_search(req, api_key, db_path, request_id)
+
+
+def _run_corridor_search(req: SearchRequest, api_key: str | None,
+                         db_path: str, request_id: str) -> dict[str, Any]:
+    log.info("search started " + kv(
+        **trip_fields(req.origin.upper(), req.dest.upper(),
+                      req.departure_time),
+        beam=req.beam_width, depth=req.depth_limit,
+        cap=req.max_tool_calls,
+        source="fixtures" if req.use_fixtures else "live",
+        turbulence=req.include_turbulence,
+        explanation=req.include_explanation))
+
     client, fixtures = _build_client(req, api_key)
 
     path = Path(db_path)
@@ -456,10 +479,30 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
                 "by_type": cache_after["by_type"],
             },
             "call_log": list(client.call_log),
+            "request_id": request_id,
         }
         # The explainer reads the finished payload, so it can only restate
         # what the search already established.
         payload["explanation"] = _explain(payload, req.include_explanation)
+
+        log.info("search finished " + kv(
+            request_id=request_id,
+            stop=result.stop.value, truncated=result.truncated,
+            nodes=result.nodes_generated, calls=result.calls_used,
+            elapsed=result.elapsed, winner=result.winner.id if result.winner else None,
+            reading=result.reading.value,
+            contested=result.contested))
+        if result.truncated:
+            log.warning("search stopped on a budget rather than confidence "
+                        + kv(stop=result.stop.value,
+                             calls=result.calls_used,
+                             cap=req.max_tool_calls))
+        if result.reading.value == "unresolved":
+            log.info("no turbulence reading established "
+                     + kv(observed=(payload["outcome"]["turbulence"] or {})
+                          .get("observed", {}).get("reading"),
+                          forecast=(payload["outcome"]["turbulence"] or {})
+                          .get("forecast", {}).get("reading")))
 
         # Narration is derived from the finished payload, so it can describe
         # what happened but never influence it.

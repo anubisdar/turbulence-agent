@@ -43,7 +43,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from app.logging_setup import get_logger, kv
 from app.reasoning.critic import Severity
+
+log = get_logger("explainer")
 
 DEFAULT_MODEL = os.environ.get("TURBULENCE_EXPLAINER_MODEL",
                                "claude-sonnet-5")
@@ -249,6 +252,12 @@ class Explanation:
     model: str | None = None
     rejected: list[str] = field(default_factory=list)
     facts: dict[str, Any] = field(default_factory=dict)
+    #: What the model actually wrote when its output was rejected. Kept so
+    #: a discarded explanation can be read afterwards. The reason alone -
+    #: "names a severity the evidence does not hold" - says which rule
+    #: fired but not what was nearly shown to a passenger, and that is the
+    #: part worth reviewing.
+    discarded_text: str | None = None
 
 
 def explain(payload: dict[str, Any], client: ModelClient | None = None,
@@ -273,13 +282,28 @@ def explain(payload: dict[str, Any], client: ModelClient | None = None,
     try:
         text = client.complete(SYSTEM_PROMPT, user)
     except Exception as e:  # noqa: BLE001 - an outage degrades prose, not truth
+        log.warning("explainer call failed, using the plain summary "
+                    + kv(error=type(e).__name__,
+                         reading=facts.get("reading")))
         return Explanation(text=fallback, source="deterministic", facts=facts,
                            rejected=[f"model call failed: {type(e).__name__}"])
 
     verdict = validate(text, facts)
     if not verdict.ok:
+        # An explanation that failed the checks is the most interesting
+        # thing this agent produces. Log the reasons at warning and the
+        # text itself at info, so a reviewer can see what was nearly shown
+        # rather than only which rule caught it.
+        log.warning("explainer output rejected "
+                    + kv(reasons="; ".join(verdict.reasons),
+                         reading=facts.get("reading"),
+                         model=model_name or DEFAULT_MODEL))
+        log.info("explainer discarded text " + kv(text=text.strip()))
         return Explanation(text=fallback, source="deterministic", facts=facts,
-                           rejected=verdict.reasons)
+                           rejected=verdict.reasons, discarded_text=text.strip())
 
+    log.info("explainer output accepted "
+             + kv(reading=facts.get("reading"), words=len(text.split()),
+                  model=model_name or DEFAULT_MODEL))
     return Explanation(text=text.strip(), source="model",
                        model=model_name or DEFAULT_MODEL, facts=facts)

@@ -218,3 +218,43 @@ class TestTheModelSeesOnlyFacts:
                      "Always carry the uncertainty",
                      "not the same as the air being calm"):
             assert rule in SYSTEM_PROMPT
+
+
+class TestRejectedOutputIsRecoverable:
+    """The reason names which rule fired. The text says what was nearly
+    shown to a passenger, and that is the part worth reviewing."""
+
+    def test_the_discarded_text_is_kept(self):
+        bad = GOOD_MODERATE + " Some segments could see severe conditions."
+        out = explain(payload(), client=FakeClient(reply=bad))
+        assert out.source == "deterministic"
+        assert out.discarded_text == bad
+
+    def test_an_accepted_explanation_discards_nothing(self):
+        out = explain(payload(), client=FakeClient(reply=GOOD_MODERATE))
+        assert out.discarded_text is None
+
+    def test_a_failed_call_has_nothing_to_discard(self):
+        out = explain(payload(),
+                      client=FakeClient(raises=ConnectionError("down")))
+        assert out.discarded_text is None
+
+    def test_the_rejection_is_logged_with_its_reason(self):
+        import io
+        from app.logging_setup import configure
+        buf = io.StringIO()
+        configure(level="DEBUG", use_syslog=False, stream=buf, force=True)
+        bad = GOOD_MODERATE + " You should be fine."
+        explain(payload(), client=FakeClient(reply=bad))
+        logged = buf.getvalue()
+        assert "explainer output rejected" in logged
+        assert "reassurance" in logged
+
+    def test_the_discarded_text_reaches_the_log(self):
+        import io
+        from app.logging_setup import configure
+        buf = io.StringIO()
+        configure(level="DEBUG", use_syslog=False, stream=buf, force=True)
+        bad = GOOD_MODERATE + " Some segments could see severe conditions."
+        explain(payload(), client=FakeClient(reply=bad))
+        assert "Some segments could see severe" in buf.getvalue()
