@@ -31,7 +31,13 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any
 
-from app.logging_setup import get_logger, kv, request_context, trip_fields
+from app.logging_setup import (
+    current_request_id,
+    get_logger,
+    kv,
+    request_context,
+    trip_fields,
+)
 from app.reasoning.controller import Budget, SearchResult, search
 from app.reasoning.critic import Corridor
 from app.reasoning.generator import CorridorGenerator
@@ -395,6 +401,12 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
     the critic, the controller and the explainer can be read as one story
     rather than as interleaved fragments.
     """
+    # Reuse the id the API layer established, so a log line written before
+    # the search started correlates with the ones written during it. A new
+    # context here would split one request across two ids.
+    existing = current_request_id()
+    if existing and existing != "-":
+        return _run_corridor_search(req, api_key, db_path, existing)
     with request_context() as request_id:
         return _run_corridor_search(req, api_key, db_path, request_id)
 

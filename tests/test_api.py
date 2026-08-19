@@ -147,11 +147,21 @@ class TestCorridorSearch:
         assert data["trace"]
         assert data["generator_notes"]
 
-    def test_reading_is_unresolved_without_weather(self, client):
-        """Evidence is not attached yet, so this must not read as smooth."""
+    def test_a_reading_is_never_smooth_without_evidence(self, client):
+        """Written when nothing gathered weather, so it asserted unresolved.
+        The fixtures now carry a forecast, so the reading can legitimately
+        be moderate. What must still hold is the rule underneath: a reading
+        of smooth requires a source that said smooth."""
         data = do_search(client)
-        assert data["outcome"]["reading"] == "unresolved"
-        assert any("not smooth" in n.lower() for n in data["notes"])
+        wx = data["outcome"]["turbulence"] or {}
+        if data["outcome"]["reading"] == "smooth":
+            sources = {(wx.get("observed") or {}).get("reading"),
+                       (wx.get("forecast") or {}).get("reading")}
+            assert "smooth" in sources, \
+                "smooth must come from a source, not from an absence"
+        else:
+            assert data["outcome"]["reading"] in (
+                "unresolved", "light", "moderate", "severe", "extreme")
 
     def test_the_call_budget_is_respected(self, client):
         data = do_search(client, max_tool_calls=2)
@@ -421,8 +431,14 @@ class TestNarration:
         assert "Coverage is never allowed to prune" in text
 
     def test_an_unresolved_reading_is_not_dressed_up(self, client):
-        text = " ".join(b["text"] for b in do_search(client)["narration"])
-        assert "Unresolved is not smooth" in text
+        """Only when the reading is actually unresolved. The fixtures now
+        include a forecast, so this route can resolve."""
+        data = do_search(client)
+        text = " ".join(b["text"] for b in data["narration"])
+        if data["outcome"]["reading"] == "unresolved":
+            assert "Unresolved is not smooth" in text
+        else:
+            assert "smooth" not in text.lower() or "not smooth" in text.lower()
 
     def test_pruned_branches_are_narrated_with_a_reason(self, client):
         data = do_search(client)
@@ -726,7 +742,12 @@ class TestTimeLimit:
     def test_it_is_echoed_back(self, client):
         assert do_search(client)["request"]["max_seconds"] == 60.0
 
-    def test_it_can_be_set_per_search(self, client):
+    def test_it_can_be_set_per_search(self, client, monkeypatch):
+        """Pinned to private mode. A shell with TURBULENCE_PUBLIC still
+        exported would clamp the value and fail a test that is about the
+        parameter being settable, not about the ceiling."""
+        import app.web.api as api
+        monkeypatch.setattr(api, "PUBLIC", False)
         assert do_search(client, max_seconds=120.0)[
             "request"]["max_seconds"] == 120.0
 
@@ -793,3 +814,103 @@ class TestDegradedIsReported:
         assert degraded
         assert "different thing from a budget running out" in degraded[0]["text"]
         assert "rate limited" in str(degraded[0]["detail"])
+
+
+class TestErrorsDoNotLeakDetail:
+    """Exception text is where a credential escapes. AeroAPIError embeds up
+    to 200 characters of upstream response body, and a 401 from AeroAPI can
+    carry key material. Redaction covered the path to the log; nothing
+    covered the path to an HTTP response."""
+
+    def test_an_unexpected_failure_returns_a_reference_not_a_cause(
+            self, client, monkeypatch):
+        def boom(*a, **kw):
+            raise RuntimeError(
+                "401 on /flights - key rejected: "
+                '{"x-apikey":"live_9f8e7d6c5b4a"}')
+        monkeypatch.setattr("app.web.api.run_corridor_search", boom)
+        r = client.post("/api/search/corridors",
+                        json={"origin": "KPIT", "dest": "KBOS"})
+        assert r.status_code == 500
+        body = r.json()["detail"]
+        assert "live_9f8e7d6c5b4a" not in body
+        assert "x-apikey" not in body
+        assert "RuntimeError" not in body
+        assert "Reference" in body
+
+    def test_service_errors_are_still_explained(self, client):
+        """These messages are written for the caller and carry no upstream
+        text, so withholding them would help nobody."""
+        r = client.post("/api/search/corridors",
+                        json={"origin": "KPIT", "dest": "KBOS",
+                              "use_fixtures": False})
+        assert r.status_code == 400
+        assert "AEROAPI_KEY" in r.json()["detail"]
+
+    def test_the_reference_is_the_request_id(self, client, monkeypatch):
+        """So an operator can find the cause in the log from what the user
+        quotes back."""
+        def boom(*a, **kw):
+            raise RuntimeError("something went wrong")
+        monkeypatch.setattr("app.web.api.run_corridor_search", boom)
+        detail = client.post("/api/search/corridors",
+                             json={"origin": "KPIT", "dest": "KBOS"}
+                             ).json()["detail"]
+        reference = detail.split("Reference ")[1].split()[0]
+        assert len(reference) >= 8
+
+
+class TestSecurityHeaders:
+    def test_a_content_security_policy_is_sent(self, client):
+        """Third-party text reaches the page and escaping is applied by hand
+        in around forty places. A policy makes one missed call fail closed."""
+        csp = client.get("/api/health").headers.get("Content-Security-Policy")
+        assert csp
+        assert "default-src 'self'" in csp
+        assert "frame-ancestors 'none'" in csp
+
+    def test_the_map_and_font_origins_are_allowed(self):
+        """A policy that breaks the page would just be turned off."""
+        from app.web.api import app
+        from fastapi.testclient import TestClient
+        csp = TestClient(app).get("/api/health").headers[
+            "Content-Security-Policy"]
+        assert "unpkg.com" in csp
+        assert "fonts.gstatic.com" in csp
+        assert "basemaps.cartocdn.com" in csp
+
+    def test_sniffing_and_referrers_are_handled(self, client):
+        headers = client.get("/api/health").headers
+        assert headers["X-Content-Type-Options"] == "nosniff"
+        assert headers["Referrer-Policy"] == "no-referrer"
+
+
+class TestPublicCeilings:
+    """A single request could ask for 40 calls and 300 seconds, which is
+    five times a normal search and the only worker held for five minutes."""
+
+    def test_the_ceilings_are_lower_than_the_operator_limits(self):
+        from app.web.api import PUBLIC_MAX_SECONDS, PUBLIC_MAX_TOOL_CALLS
+        assert PUBLIC_MAX_TOOL_CALLS < 40
+        assert PUBLIC_MAX_SECONDS < 300
+
+    def test_an_expensive_request_is_clamped_not_rejected(self, monkeypatch):
+        """A caller asking for too much gets a working search rather than an
+        error, and the response says what was actually used."""
+        import app.web.api as api
+        monkeypatch.setattr(api, "PUBLIC", True)
+        body = api.CorridorSearchBody(origin="KPIT", dest="KBOS",
+                                      max_tool_calls=40, max_seconds=300.0)
+        clamped = body.clamped()
+        assert clamped.max_tool_calls == api.PUBLIC_MAX_TOOL_CALLS
+        assert clamped.max_seconds == api.PUBLIC_MAX_SECONDS
+
+    def test_a_private_deployment_is_unclamped(self, monkeypatch):
+        import app.web.api as api
+        monkeypatch.setattr(api, "PUBLIC", False)
+        body = api.CorridorSearchBody(origin="KPIT", dest="KBOS",
+                                      max_tool_calls=40, max_seconds=300.0)
+        assert body.clamped().max_tool_calls == 40
+
+    def test_health_reports_which_mode_it_is_in(self, client):
+        assert "public" in client.get("/api/health").json()

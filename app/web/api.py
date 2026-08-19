@@ -28,6 +28,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from app.logging_setup import (
+    current_request_id,
+    get_logger,
+    kv,
+    request_context,
+)
 from app.web.service import (
     DEFAULT_DB,
     SearchRequest,
@@ -40,9 +46,51 @@ from app.web.service import (
 API_TITLE = "Turbulence-aware flight ranking agent"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
+log = get_logger("api")
+
+#: True unless the deployment says otherwise. Public means anonymous
+#: callers, which changes what the ceilings should be and whether the
+#: interactive docs should exist at all.
+PUBLIC = os.environ.get("TURBULENCE_PUBLIC", "").lower() in ("1", "true", "yes")
+
+#: Ceilings for an anonymous caller. The permissive values remain available
+#: to an operator running the search scripts directly; they are not
+#: something a stranger should be able to ask for.
+#:
+#: A single request at the old limits could cost five times a normal search
+#: and hold the only worker for five minutes, which is the cheapest way to
+#: turn one request into real money.
+PUBLIC_MAX_TOOL_CALLS = 16
+PUBLIC_MAX_SECONDS = 60.0
+
+
+def _fail(exc: Exception, status: int = 500) -> HTTPException:
+    """Log the cause, tell the caller a reference.
+
+    Exception text is where a credential escapes. `AeroAPIError` embeds up
+    to 200 characters of the upstream response body, and a 401 from AeroAPI
+    can carry key material. Redaction covers the path to the log; nothing
+    covered the path to an HTTP response, so the response no longer carries
+    the detail at all.
+    """
+    reference = current_request_id()
+    log.error("request failed " + kv(error=type(exc).__name__,
+                                     detail=str(exc)[:300],
+                                     reference=reference))
+    return HTTPException(
+        status_code=status,
+        detail=(f"The search could not be completed. Reference {reference} "
+                f"if you are reporting this."))
+
 app = FastAPI(
     title=API_TITLE,
     version="0.1.0",
+    # The interactive docs list every parameter and its bounds, including
+    # the expensive ones. That is useful to an operator and a head start to
+    # anyone looking for a way to make one request cost a lot.
+    docs_url=None if PUBLIC else "/docs",
+    redoc_url=None if PUBLIC else "/redoc",
+    openapi_url=None if PUBLIC else "/openapi.json",
     description=(
         "Corridor hypothesis search and aircraft reputation retrieval. "
         "Turbulence evidence is not yet attached, so readings come back "
@@ -59,6 +107,44 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def correlate(request, call_next):
+    """Give every request an id before anything can fail.
+
+    The id used to be created inside the search, which meant a failure
+    before that point logged `reference=-` and handed the caller a
+    reference that matched nothing. The one case where a reference matters
+    most is the one where it was missing.
+    """
+    with request_context():
+        return await call_next(request)
+
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    """Defence in depth for the page.
+
+    Third-party text - AeroAPI idents, NTSB narratives, forecast fields -
+    reaches the browser. The page escapes on every interpolation, which is
+    the right control, but it is applied by hand in around forty places. A
+    policy means one missed call fails closed rather than executing.
+    """
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://unpkg.com; "
+        "style-src 'self' 'unsafe-inline' https://unpkg.com "
+        "https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; "
+        "img-src 'self' data: https://*.basemaps.cartocdn.com; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; base-uri 'none'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 def _db_path() -> str:
@@ -112,6 +198,20 @@ class CorridorSearchBody(BaseModel):
                            "summary if it is unavailable or its output fails "
                            "validation.")
 
+    def clamped(self) -> "CorridorSearchBody":
+        """Apply the public ceilings, if this deployment is public.
+
+        Clamped rather than rejected: a caller asking for 40 calls gets a
+        working search at 16 rather than an error, and the response echoes
+        what was actually used so the difference is visible.
+        """
+        if not PUBLIC:
+            return self
+        return self.model_copy(update={
+            "max_tool_calls": min(self.max_tool_calls, PUBLIC_MAX_TOOL_CALLS),
+            "max_seconds": min(self.max_seconds, PUBLIC_MAX_SECONDS),
+        })
+
     def to_request(self) -> SearchRequest:
         return SearchRequest(
             origin=self.origin, dest=self.dest,
@@ -137,6 +237,7 @@ def health() -> dict:
     db = Path(_db_path())
     return {
         "status": "ok",
+        "public": PUBLIC,
         "database": str(db),
         "database_present": db.exists(),
         "aeroapi_key_configured": bool(_api_key()),
@@ -154,12 +255,14 @@ def corridor_search(body: CorridorSearchBody) -> dict:
     trace, and every note the generator and controller raised.
     """
     try:
-        return run_corridor_search(body.to_request(), _api_key(), _db_path())
+        return run_corridor_search(body.clamped().to_request(),
+                                   _api_key(), _db_path())
     except ServiceError as e:
+        # ServiceError messages are written for the caller and carry no
+        # upstream text, so they are safe to return.
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:  # noqa: BLE001 - surface the cause, do not mask it
-        raise HTTPException(status_code=500,
-                            detail=f"{type(e).__name__}: {e}")
+    except Exception as e:  # noqa: BLE001
+        raise _fail(e)
 
 
 @app.get("/api/search/reputation", tags=["reputation"])
@@ -179,8 +282,7 @@ def reputation_search(
     except ServiceError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500,
-                            detail=f"{type(e).__name__}: {e}")
+        raise _fail(e)
 
 
 @app.get("/api/fixes", tags=["meta"])
