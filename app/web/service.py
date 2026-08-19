@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
@@ -38,6 +39,7 @@ from app.logging_setup import (
     request_context,
     trip_fields,
 )
+from app.runs import Timings, from_payload, init_runs, record_run, resolve_country
 from app.reasoning.controller import Budget, SearchResult, search
 from app.reasoning.critic import Corridor
 from app.reasoning.generator import CorridorGenerator
@@ -204,6 +206,8 @@ class SearchRequest:
     #: Off by default. The deterministic summary is already a complete
     #: answer; the model only rewrites it into something more readable.
     include_explanation: bool = False
+    #: Used to resolve a country and then discarded. Never stored.
+    client_ip: str | None = None
 
 
 def _build_client(req: SearchRequest, api_key: str | None
@@ -413,6 +417,7 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
 
 def _run_corridor_search(req: SearchRequest, api_key: str | None,
                          db_path: str, request_id: str) -> dict[str, Any]:
+    timings = Timings()
     log.info("search started " + kv(
         **trip_fields(req.origin.upper(), req.dest.upper(),
                       req.departure_time),
@@ -521,7 +526,25 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
         }
         # The explainer reads the finished payload, so it can only restate
         # what the search already established.
+        explain_started = time.perf_counter()
         payload["explanation"] = _explain(payload, req.include_explanation)
+        timings.explainer_seconds = round(time.perf_counter() - explain_started, 4)
+        timings.scoring_seconds = round(
+            max(0.0, (result.elapsed or 0)
+                - timings.aeroapi_seconds - timings.awc_seconds), 4)
+
+        # One row per search, so the agent's behaviour can be asked
+        # questions rather than only described. Never allowed to fail a
+        # search: a missing row is a gap in a chart.
+        try:
+            runs_conn = sqlite3.connect(db_path)
+            init_runs(runs_conn)
+            record_run(runs_conn, from_payload(
+                payload, request_id, timings,
+                country=resolve_country(req.client_ip)))
+            runs_conn.close()
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not record the run " + kv(error=type(e).__name__))
 
         log.info("search finished " + kv(
             request_id=request_id,

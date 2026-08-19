@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent status</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root[data-theme="dark"]{
+  --bg:#070C12; --panel:#0E151E; --raised:#18232F; --rule:#2A3A4A;
+  --ink:#F0F5F9; --mid:#B3C2CE; --dim:#7E90A0;
+  --live:#4CC9F0; --caution:#FFC061; --good:#5DCAA5; --model:#A78BFA;
+  --neutral:#5C6C7A;
+}
+:root[data-theme="light"]{
+  --bg:#EEF2F6; --panel:#FFFFFF; --raised:#F3F6F9; --rule:#CFD9E2;
+  --ink:#111C26; --mid:#3C4C5A; --dim:#61717F;
+  --live:#0E7FA8; --caution:#9A6100; --good:#0F6E56; --model:#5B47B8;
+  --neutral:#8B9AA6;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:15px/1.55 "IBM Plex Sans",system-ui,sans-serif;
+}
+header{
+  display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
+  padding:16px 22px; background:var(--panel);
+  border-bottom:1px solid var(--rule);
+}
+h1{margin:0; font-size:15px; font-weight:600; letter-spacing:.14em; text-transform:uppercase}
+.sub{font:12px/1 "IBM Plex Mono",monospace; color:var(--dim); letter-spacing:.06em}
+.spacer{flex:1}
+.themes{display:flex; border:1px solid var(--rule)}
+.themes button{
+  background:none; border:0; color:var(--dim); cursor:pointer; padding:5px 12px;
+  font:11px/1 "IBM Plex Mono",monospace; letter-spacing:.12em; text-transform:uppercase;
+}
+.themes button[aria-pressed="true"]{background:var(--live); color:var(--bg)}
+main{padding:22px; max-width:1180px; margin:0 auto}
+.eyebrow{
+  font:11px/1 "IBM Plex Mono",monospace; letter-spacing:.14em;
+  text-transform:uppercase; color:var(--dim); margin-bottom:10px;
+}
+.cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:1px; background:var(--rule); border:1px solid var(--rule); margin-bottom:22px}
+.card{background:var(--panel); padding:14px 16px}
+.card b{display:block; font-size:26px; font-weight:600; letter-spacing:-.01em}
+.card span{font:11px/1 "IBM Plex Mono",monospace; letter-spacing:.1em; text-transform:uppercase; color:var(--dim)}
+.card em{font-style:normal; font-size:12px; color:var(--mid)}
+.grid{display:grid; gap:16px; margin-bottom:16px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
+.panel{background:var(--panel); border:1px solid var(--rule); padding:16px 18px}
+.panel h2{margin:0 0 2px; font-size:14px; font-weight:600}
+.panel p.note{margin:0 0 14px; font-size:12.5px; color:var(--dim)}
+.chart{position:relative; height:170px}
+.chart.tall{height:210px}
+.chart.short{height:110px}
+.rows{font-size:13px}
+.row{display:flex; justify-content:space-between; gap:12px; padding:6px 0; border-bottom:1px solid var(--rule)}
+.row:last-child{border-bottom:0}
+.row span{color:var(--mid); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.row b{font:12.5px/1.4 "IBM Plex Mono",monospace; font-weight:500; color:var(--ink)}
+.big{display:flex; align-items:baseline; gap:9px; margin-bottom:10px}
+.big b{font-size:26px; font-weight:600}
+.big span{font-size:12.5px; color:var(--dim)}
+.aside{
+  margin-top:13px; padding:9px 11px; background:var(--raised);
+  border-left:2px solid var(--neutral); font-size:12.5px; color:var(--mid); line-height:1.55;
+}
+.aside.accent{border-left-color:var(--live)}
+.empty{padding:30px 0; text-align:center; color:var(--dim); font-size:13px}
+footer{padding:6px 22px 26px; max-width:1180px; margin:0 auto; font-size:12px; color:var(--dim)}
+footer a{color:var(--live)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Agent status</h1>
+  <span class="sub" id="window">last 30 days</span>
+  <span class="spacer"></span>
+  <span class="sub" id="stamp"></span>
+  <div class="themes">
+    <button id="t-dark" aria-pressed="true">Dark</button>
+    <button id="t-light" aria-pressed="false">Light</button>
+  </div>
+</header>
+
+<main id="main">
+  <div class="empty">Loading&hellip;</div>
+</main>
+
+<footer>
+  <span id="foot"></span> &middot; <a href="/">back to the agent</a>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const n = v => (v == null ? 0 : v).toLocaleString();
+const cssVar = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+
+let charts = [];
+
+function setTheme(mode){
+  document.documentElement.dataset.theme = mode;
+  $('t-dark').setAttribute('aria-pressed', mode === 'dark');
+  $('t-light').setAttribute('aria-pressed', mode === 'light');
+  try { localStorage.setItem('status-theme', mode); } catch (e) {}
+  if (window.__data) render(window.__data);
+}
+$('t-dark').onclick = () => setTheme('dark');
+$('t-light').onclick = () => setTheme('light');
+try {
+  const saved = localStorage.getItem('status-theme');
+  if (saved) document.documentElement.dataset.theme = saved;
+  $('t-dark').setAttribute('aria-pressed', (saved || 'dark') === 'dark');
+  $('t-light').setAttribute('aria-pressed', saved === 'light');
+} catch (e) {}
+
+function rows(items, label, value, emptyText){
+  if (!items || !items.length) return `<div class="empty">${esc(emptyText)}</div>`;
+  return '<div class="rows">' + items.map(i =>
+    `<div class="row"><span>${esc(label(i))}</span><b>${esc(value(i))}</b></div>`
+  ).join('') + '</div>';
+}
+
+function render(d){
+  window.__data = d;
+  charts.forEach(c => c.destroy());
+  charts = [];
+
+  const t = d.totals || {}, m = d.models || {}, tim = d.timing || {};
+  const searches = t.searches || 0;
+  const pct = searches ? Math.round((t.resolved || 0) / searches * 100) : 0;
+  const llmCalls = m.llm_calls || 0;
+  const accepted = llmCalls ? Math.round((m.llm_accepted || 0) / llmCalls * 100) : null;
+  const spend = ((m.tokens_in || 0) / 1e6 * 3 + (m.tokens_out || 0) / 1e6 * 15);
+
+  $('window').textContent = `last ${d.window_days} days`;
+  $('stamp').textContent = new Date().toISOString().slice(11, 16) + ' UTC';
+  $('foot').textContent =
+    `${n(searches)} searches recorded. Country is resolved at write time and the address discarded.`;
+
+  if (!searches){
+    $('main').innerHTML =
+      '<div class="empty">No searches recorded yet. Run one and reload.</div>';
+    return;
+  }
+
+  $('main').innerHTML = `
+    <div class="cards">
+      <div class="card"><span>Searches</span><b>${n(searches)}</b></div>
+      <div class="card"><span>Resolved</span><b>${pct}%</b>
+        <em>${n(t.resolved)} of ${n(searches)}</em></div>
+      <div class="card"><span>API calls</span><b>${n(t.api_calls)}</b></div>
+      <div class="card"><span>Median</span><b>${(d.median_seconds || 0).toFixed(1)}s</b></div>
+      <div class="card"><span>Degraded</span><b>${n(t.degraded)}</b>
+        <em>a source failed</em></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:16px">
+      <h2>Searches per day</h2>
+      <p class="note">split by whether a turbulence reading could be established</p>
+      <div class="chart tall"><canvas id="c-daily"></canvas></div>
+    </div>
+
+    <div class="grid g2">
+      <div class="panel">
+        <h2>Which source spoke</h2>
+        <p class="note">pilot reports, forecast, both or neither</p>
+        <div class="chart"><canvas id="c-sources"></canvas></div>
+        <div class="aside">Held apart on purpose. A corridor nobody has reported on is
+          unobserved, which is not the same as smooth.</div>
+      </div>
+      <div class="panel">
+        <h2>Where the time goes</h2>
+        <p class="note">mean seconds per search, by component</p>
+        <div class="chart short"><canvas id="c-timing"></canvas></div>
+        <div class="aside accent">Scoring is ${(tim.scoring || 0).toFixed(2)}s of
+          ${(d.median_seconds || 0).toFixed(1)}s. The part that decides the answer is
+          the part that costs nothing.</div>
+      </div>
+    </div>
+
+    <div class="grid g2">
+      <div class="panel">
+        <h2>Where the work happens</h2>
+        <p class="note">component invocations across every search</p>
+        <div class="chart"><canvas id="c-work"></canvas></div>
+      </div>
+      <div class="panel">
+        <h2>Models</h2>
+        <p class="note">one runs here, one runs elsewhere</p>
+        <div class="big"><b>${n(llmCalls)}</b>
+          <span>language model calls${accepted !== null ? ` &middot; ${accepted}% accepted` : ''}</span></div>
+        <div class="rows">
+          <div class="row"><span>tokens in / out</span>
+            <b>${n(m.tokens_in)} / ${n(m.tokens_out)}</b></div>
+          <div class="row"><span>estimated spend</span>
+            <b>$${spend.toFixed(2)}</b></div>
+          <div class="row"><span>mean latency</span>
+            <b>${(m.llm_seconds || 0).toFixed(2)}s</b></div>
+          <div class="row"><span>embedding invocations</span>
+            <b>${n(m.embedding_calls)}</b></div>
+          <div class="row"><span>embedding CPU per call</span>
+            <b>${(m.embedding_cpu_ms || 0).toFixed(1)} ms</b></div>
+        </div>
+        <div class="aside">The language model runs on someone else&rsquo;s hardware, so it has
+          tokens and latency but no CPU figure. The embedding model runs here, so it has
+          CPU and no bill.</div>
+      </div>
+    </div>
+
+    <div class="grid g2">
+      <div class="panel">
+        <h2>Explanations the guardrail caught</h2>
+        <p class="note">rejected rather than repaired, and the plain summary shown instead</p>
+        ${rows(d.rejections, r => r.reason, r => r.n,
+               'Nothing rejected in this window.')}
+      </div>
+      <div class="panel">
+        <h2>Degraded searches</h2>
+        <p class="note">a data source failed, so fewer corridors were built</p>
+        ${rows(d.degraded, r => r.reason, r => r.n,
+               'No source failures in this window.')}
+      </div>
+    </div>
+
+    <div class="grid g2">
+      <div class="panel">
+        <h2>Where requests come from</h2>
+        <p class="note">country only, resolved at write time</p>
+        ${rows(d.countries, r => r.country, r => r.n,
+               'No country data. The GeoIP database may not be readable.')}
+      </div>
+      <div class="panel">
+        <h2>Blocked at the edge</h2>
+        <p class="note">stopped by Caddy, so they never reached the application</p>
+        ${rows(d.blocked, r => r.reason, r => r.n,
+               'Edge counts come from the Caddy log and are not wired up yet.')}
+      </div>
+    </div>`;
+
+  // The numbers and tables are the substance; the charts illustrate them.
+  // If the CDN is unreachable the page should still be worth loading, so a
+  // missing Chart is a degraded page rather than a blank one.
+  if (typeof Chart === 'undefined'){
+    document.querySelectorAll('.chart').forEach(el => {
+      el.style.height = 'auto';
+      el.innerHTML = '<div class="empty">Charts need Chart.js, which did not load.</div>';
+    });
+    return;
+  }
+
+  const ink = cssVar('--ink'), dim = cssVar('--dim'), rule = cssVar('--rule');
+  const live = cssVar('--live'), good = cssVar('--good'),
+        caution = cssVar('--caution'), model = cssVar('--model'),
+        neutral = cssVar('--neutral');
+  Chart.defaults.font.family = '"IBM Plex Sans", system-ui, sans-serif';
+  Chart.defaults.font.size = 11;
+  Chart.defaults.color = dim;
+  const legend = {position:'bottom', labels:{boxWidth:10, boxHeight:10, padding:12}};
+
+  charts.push(new Chart($('c-daily'), {
+    type:'bar',
+    data:{labels:d.daily.map(r => r.day.slice(5)),
+      datasets:[
+        {label:'resolved', data:d.daily.map(r => r.resolved || 0),
+         backgroundColor:good, stack:'a'},
+        {label:'unresolved', data:d.daily.map(r => (r.total || 0) - (r.resolved || 0)),
+         backgroundColor:neutral, stack:'a'}]},
+    options:{responsive:true, maintainAspectRatio:false, plugins:{legend},
+      scales:{x:{stacked:true, grid:{display:false}, ticks:{maxRotation:0, autoSkipPadding:14}},
+              y:{stacked:true, grid:{color:rule}, border:{display:false}, ticks:{precision:0}}}}
+  }));
+
+  charts.push(new Chart($('c-sources'), {
+    type:'doughnut', data:{labels:d.sources.map(r => r.which),
+      datasets:[{data:d.sources.map(r => r.n),
+        backgroundColor:[model, good, caution, neutral], borderWidth:0}]},
+    options:{responsive:true, maintainAspectRatio:false, cutout:'60%',
+      plugins:{legend:{...legend, position:'right'}}}
+  }));
+
+  charts.push(new Chart($('c-timing'), {
+    type:'bar',
+    data:{labels:[''], datasets:[
+      {label:`AeroAPI ${(tim.aeroapi||0).toFixed(1)}s`, data:[tim.aeroapi||0], backgroundColor:live, stack:'a'},
+      {label:`AWC ${(tim.awc||0).toFixed(1)}s`, data:[tim.awc||0], backgroundColor:good, stack:'a'},
+      {label:`explainer ${(tim.explainer||0).toFixed(1)}s`, data:[tim.explainer||0], backgroundColor:model, stack:'a'},
+      {label:`retrieval ${(tim.retrieval||0).toFixed(2)}s`, data:[tim.retrieval||0], backgroundColor:caution, stack:'a'},
+      {label:`scoring ${(tim.scoring||0).toFixed(2)}s`, data:[tim.scoring||0], backgroundColor:neutral, stack:'a'}]},
+    options:{indexAxis:'y', responsive:true, maintainAspectRatio:false,
+      plugins:{legend}, scales:{
+        x:{stacked:true, grid:{color:rule}, border:{display:false},
+           ticks:{callback:v => v + 's'}},
+        y:{stacked:true, grid:{display:false}, border:{display:false}}}}
+  }));
+
+  charts.push(new Chart($('c-work'), {
+    type:'doughnut',
+    data:{labels:['deterministic scoring','embedding (local)','language model'],
+      datasets:[{data:[t.api_calls || 0, m.embedding_calls || 0, llmCalls],
+        backgroundColor:[neutral, good, model], borderWidth:0}]},
+    options:{responsive:true, maintainAspectRatio:false, cutout:'60%',
+      plugins:{legend:{...legend, position:'right'}}}
+  }));
+}
+
+fetch('/api/status')
+  .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+  .then(render)
+  .catch(e => {
+    $('main').innerHTML =
+      `<div class="empty">Could not load status: ${esc(e.message)}</div>`;
+  });
+</script>
+</body>
+</html>

@@ -134,7 +134,8 @@ async def security_headers(request, call_next):
     response = await call_next(request)
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://unpkg.com; "
+        "script-src 'self' 'unsafe-inline' https://unpkg.com "
+        "https://cdnjs.cloudflare.com; "
         "style-src 'self' 'unsafe-inline' https://unpkg.com "
         "https://fonts.googleapis.com; "
         "font-src https://fonts.gstatic.com; "
@@ -229,6 +230,71 @@ class CorridorSearchBody(BaseModel):
 
 
 # ------------------------------------------------------------------ routes
+
+
+@app.get("/api/status", tags=["meta"])
+def status(days: int = 30) -> dict:
+    """Aggregate behaviour over the retention window.
+
+    Behind whatever guards the rest of the site: it reveals usage patterns
+    and API spend, which is not information to hand an anonymous caller.
+    """
+    import sqlite3
+
+    from app.runs import init_runs, summary
+
+    days = max(1, min(days, 90))
+    try:
+        conn = sqlite3.connect(_db_path())
+        init_runs(conn)
+        try:
+            data = summary(conn, days=days)
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        raise _fail(e)
+
+    data["blocked"] = _edge_blocks()
+    return data
+
+
+def _edge_blocks() -> list[dict]:
+    """Requests Caddy stopped before they reached this application.
+
+    A different source from everything else on the page, because a blocked
+    request never becomes a search and so never becomes a row. Reading the
+    tail is enough: this answers "is the edge doing anything", not "how
+    much", and parsing a large log on every page load would make the
+    dashboard slower than the thing it describes.
+    """
+    path = os.environ.get("TURBULENCE_CADDY_LOG", "/var/log/caddy/access.log")
+    counts = {"geo filter": 0, "rate limit": 0, "failed auth": 0}
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 400_000))
+            tail = fh.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return []
+
+    for line in tail.splitlines():
+        if "blocked_by" in line or '"status":403' in line:
+            counts["geo filter"] += 1
+        elif '"status":429' in line:
+            counts["rate limit"] += 1
+        elif '"status":401' in line:
+            counts["failed auth"] += 1
+
+    return [{"reason": k, "n": v} for k, v in counts.items() if v]
+
+
+@app.get("/status", include_in_schema=False)
+def status_page():
+    page = STATIC_DIR / "status.html"
+    if not page.exists():
+        raise HTTPException(status_code=404,
+                            detail="status page not installed")
+    return FileResponse(page)
 
 
 @app.get("/api/health", tags=["meta"])
