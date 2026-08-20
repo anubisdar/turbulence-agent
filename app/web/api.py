@@ -26,7 +26,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.logging_setup import (
     current_request_id,
@@ -160,9 +160,15 @@ def _api_key() -> str | None:
 
 
 class CorridorSearchBody(BaseModel):
+    # Letters and digits only. Length alone let `KP/T` through, and an
+    # airport code is interpolated straight into a third-party URL path
+    # (`/airports/{code}`) and into the language model's prompt. Four
+    # characters bounds the damage; it does not make the input safe.
     origin: str = Field("KPIT", min_length=3, max_length=4,
-                        description="ICAO code, e.g. KPIT")
-    dest: str = Field("KBOS", min_length=3, max_length=4)
+                        pattern=r"^[A-Za-z0-9]{3,4}$",
+                        description="ICAO or IATA code, e.g. KPIT")
+    dest: str = Field("KBOS", min_length=3, max_length=4,
+                      pattern=r"^[A-Za-z0-9]{3,4}$")
     beam_width: int = Field(2, ge=1, le=6)
     depth_limit: int = Field(2, ge=1, le=4)
     confidence_threshold: float = Field(0.85, ge=0.0, le=1.5)
@@ -198,6 +204,23 @@ class CorridorSearchBody(BaseModel):
                            "paragraph. Falls back to the deterministic "
                            "summary if it is unavailable or its output fails "
                            "validation.")
+
+    @model_validator(mode="after")
+    def origin_and_destination_must_differ(self) -> "CorridorSearchBody":
+        """A route to the airport you are already at is not a route.
+
+        Rejected here rather than absorbed downstream, because the geometry
+        absorbs it badly: a zero-length path buffers to a polygon of no
+        area whose containment test rejects its own defining point. The
+        search then runs, spends metered calls, observes nothing, and
+        reports the reading as unresolved - an absence with no explanation,
+        which is the one outcome this agent is built to avoid.
+        """
+        if (self.origin or "").strip().upper() == (self.dest or "").strip().upper():
+            raise ValueError(
+                "origin and destination are the same airport, so there is no "
+                "route between them to examine")
+        return self
 
     def clamped(self) -> "CorridorSearchBody":
         """Apply the public ceilings, if this deployment is public.
@@ -268,7 +291,7 @@ def _edge_blocks() -> list[dict]:
     dashboard slower than the thing it describes.
     """
     path = os.environ.get("TURBULENCE_CADDY_LOG", "/var/log/caddy/access.log")
-    counts = {"geo filter": 0, "rate limit": 0, "failed auth": 0}
+    counts = {"geo filter": 0, "rate limit": 0}
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
@@ -277,13 +300,14 @@ def _edge_blocks() -> list[dict]:
     except (OSError, ValueError):
         return []
 
+    # 401 is deliberately not counted. A browser's first request to a
+    # basic-auth site always gets one before it resends with credentials,
+    # so counting them would report ordinary use as failed authentication.
     for line in tail.splitlines():
         if "blocked_by" in line or '"status":403' in line:
             counts["geo filter"] += 1
         elif '"status":429' in line:
             counts["rate limit"] += 1
-        elif '"status":401' in line:
-            counts["failed auth"] += 1
 
     return [{"reason": k, "n": v} for k, v in counts.items() if v]
 
@@ -338,8 +362,14 @@ def corridor_search(body: CorridorSearchBody, request: Request) -> dict:
 
 @app.get("/api/search/reputation", tags=["reputation"])
 def reputation_search(
-    aircraft_type: str = Query(..., description="e.g. '737 MAX 8', '737-8'"),
-    query: str = Query("safety incidents and accidents"),
+    # Bounded on purpose. `query` reaches the embedding model, which is the
+    # only CPU-bound operation in this system, on a service that runs a
+    # single worker. An unbounded string there is a denial of service that
+    # costs the sender nothing.
+    aircraft_type: str = Query(..., min_length=2, max_length=40,
+                               description="e.g. '737 MAX 8', '737-8'"),
+    query: str = Query("safety incidents and accidents",
+                       min_length=1, max_length=200),
     k: int = Query(8, ge=1, le=20),
 ) -> dict:
     """Retrieve NTSB Part 121 material for an aircraft type.

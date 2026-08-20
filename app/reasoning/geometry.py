@@ -287,6 +287,20 @@ def simplify_track(points: list[LatLon],
 # ------------------------------------------------------------------ overlap
 
 
+def _bounding_radius_nm(shape: CorridorShape) -> float:
+    """Half the path length plus the corridor width: a circle centred on
+    the midpoint that is guaranteed to contain the whole corridor."""
+    return shape.length_nm / 2.0 + shape.width_nm
+
+
+def _could_touch(a: CorridorShape, b: CorridorShape) -> bool:
+    """Whether two corridors are close enough to possibly share airspace."""
+    a_mid, b_mid = midpoint(a.points), midpoint(b.points)
+    _, _, metres = GEOD.inv(a_mid[1], a_mid[0], b_mid[1], b_mid[0])
+    separation_nm = metres / 1852.0
+    return separation_nm <= _bounding_radius_nm(a) + _bounding_radius_nm(b)
+
+
 def overlap_fraction(a: CorridorShape, b: CorridorShape) -> float:
     """How much airspace two corridors share, 0 to 1.
 
@@ -298,6 +312,20 @@ def overlap_fraction(a: CorridorShape, b: CorridorShape) -> float:
     Both are compared in the first corridor's projection.
     """
     if a.polygon is None or b.polygon is None:
+        return 0.0
+
+    # An azimuthal equidistant projection sends the antipode of its centre
+    # to infinity, so reprojecting a distant corridor inflates it without
+    # bound: a 5,000 nm2 shape on the far side of the planet measures 140
+    # million once reprojected, and the overlap that follows is meaningless
+    # in one direction and 1.0 in the other.
+    #
+    # Two corridors that cannot touch are cheaper to reject than to
+    # project. Each is bounded by a circle of half its path length plus its
+    # width, centred on its midpoint; if those circles are disjoint the
+    # corridors are, and the projection is never asked a question it cannot
+    # answer.
+    if not _could_touch(a, b):
         return 0.0
 
     def reproject(x, y):

@@ -914,3 +914,122 @@ class TestPublicCeilings:
 
     def test_health_reports_which_mode_it_is_in(self, client):
         assert "public" in client.get("/api/health").json()
+
+
+class TestPruneDecisionsAreLogged:
+    """The dominance threshold was calibrated from one observed search and
+    has been assumed ever since. One line per decision makes "how often does
+    it fire" a query rather than a memory."""
+
+    def _search(self, client):
+        import io
+        from app.logging_setup import configure
+        buf = io.StringIO()
+        configure(level="DEBUG", use_syslog=False, stream=buf, force=True)
+        do_search(client)
+        return buf.getvalue()
+
+    def test_every_decision_produces_a_line(self, client):
+        logged = self._search(client)
+        assert "critic decision" in logged
+
+    def test_the_decision_is_named(self, client):
+        logged = self._search(client)
+        assert "decision=keep" in logged
+
+    def test_a_pruned_corridor_carries_its_reason(self, client):
+        logged = self._search(client)
+        pruned = [l for l in logged.splitlines()
+                  if "critic decision" in l and "decision=prune" in l]
+        assert pruned, "a beam of two from four candidates must prune"
+        assert any("reason=" in l for l in pruned)
+
+    def test_depth_is_recorded(self, client):
+        """Otherwise a depth-2 prune is indistinguishable from a depth-1 one."""
+        assert "depth=" in self._search(client)
+
+
+class TestFixCacheEffectiveness:
+    """The cost argument in every write-up is that cached fixes make later
+    searches cheaper. It was measured once, informally."""
+
+    def test_the_saving_is_reported(self, client):
+        cache = do_search(client)["fix_cache"]
+        assert "routings_served_warm" in cache
+        assert "calls_saved" in cache
+
+    def test_the_counts_are_consistent(self, client):
+        cache = do_search(client)["fix_cache"]
+        assert cache["calls_saved"] <= cache["routings_served_warm"] or \
+            cache["routings_served_warm"] == 0
+
+    def test_a_warm_cache_saves_at_least_as_much_as_a_cold_one(self, client):
+        first = do_search(client)["fix_cache"]
+        second = do_search(client)["fix_cache"]
+        assert second["calls_saved"] >= first["calls_saved"]
+
+    def test_it_reaches_the_log(self, client):
+        import io
+        from app.logging_setup import configure
+        buf = io.StringIO()
+        configure(level="DEBUG", use_syslog=False, stream=buf, force=True)
+        do_search(client)
+        logged = buf.getvalue()
+        assert "fix cache" in logged
+        assert "calls_saved=" in logged
+
+
+class TestSameAirportIsRejected:
+    """A route to the airport you are already at is not a route.
+
+    Rejected at the boundary rather than absorbed downstream, because the
+    geometry absorbs it badly: a zero-length path buffers to a polygon of no
+    area whose containment test rejects its own defining point. The search
+    then runs, spends metered calls against a corridor that can contain
+    nothing, and reports the reading as unresolved - an absence with no
+    explanation, which is the one outcome this agent exists to avoid.
+    """
+
+    def test_the_same_code_twice_is_refused(self, client):
+        r = client.post("/api/search/corridors",
+                        json={"origin": "KPIT", "dest": "KPIT",
+                              "use_fixtures": True})
+        assert r.status_code == 422
+
+    @pytest.mark.parametrize("origin,dest", [
+        ("kpit", "KPIT"), ("KPIT", "kpit"), (" KPIT ", "KPIT"),
+    ])
+    def test_case_and_whitespace_do_not_evade_it(self, client, origin, dest):
+        r = client.post("/api/search/corridors",
+                        json={"origin": origin, "dest": dest,
+                              "use_fixtures": True})
+        assert r.status_code == 422
+
+    def test_the_reason_is_stated(self, client):
+        r = client.post("/api/search/corridors",
+                        json={"origin": "KPIT", "dest": "KPIT",
+                              "use_fixtures": True})
+        assert "same" in r.text.lower() or "no route" in r.text.lower()
+
+    def test_a_real_pair_is_unaffected(self, client):
+        r = client.post("/api/search/corridors",
+                        json={"origin": "KPIT", "dest": "KBOS",
+                              "use_fixtures": True})
+        assert r.status_code != 422
+
+    def test_the_service_guards_it_too(self):
+        """A script or a future caller must not be able to reach the
+        geometry with a route that has no length."""
+        from app.web.service import ServiceError, SearchRequest, \
+            run_corridor_search
+        with pytest.raises(ServiceError, match="origin and the destination"):
+            run_corridor_search(SearchRequest(origin="KPIT", dest="kpit"),
+                                None)
+
+    def test_no_metered_call_is_spent_on_a_refused_search(self, client):
+        """The point of rejecting early: a degenerate route must not cost
+        anything before it is refused."""
+        r = client.post("/api/search/corridors",
+                        json={"origin": "KPIT", "dest": "KPIT"})
+        assert r.status_code == 422
+        assert "calls_used" not in r.text

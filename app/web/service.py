@@ -406,6 +406,16 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
     the critic, the controller and the explainer can be read as one story
     rather than as interleaved fragments.
     """
+    # Guarded here as well as at the API, so a script or a future caller
+    # cannot reach the geometry with a route that has no length. A
+    # zero-length path buffers to a polygon of no area whose containment
+    # test rejects its own defining point, and the search that follows
+    # observes nothing and says nothing about why.
+    if req.origin.strip().upper() == req.dest.strip().upper():
+        raise ServiceError(
+            f"{req.origin.strip().upper()} is both the origin and the "
+            f"destination, so there is no route between them to examine.")
+
     # Reuse the id the API layer established, so a log line written before
     # the search started correlates with the ones written during it. A new
     # context here would split one request across two ids.
@@ -471,8 +481,11 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
         cache_after = cache_stats(conn)
         aircraft = _aircraft_from(generator)
         reputation = None
+        retrieval_started = time.perf_counter()
         if req.include_reputation:
-            reputation = _reputation_for(aircraft, db_path)
+            reputation = _reputation_for(aircraft, db_path, timings)
+            timings.retrieval_seconds = round(
+                time.perf_counter() - retrieval_started, 4)
 
         payload = {
             "request": {
@@ -523,6 +536,7 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
                 "before": cache_before,
                 "after": cache_after["total"],
                 "by_type": cache_after["by_type"],
+                **generator.cache_report(),
             },
             "call_log": list(client.call_log),
             "request_id": request_id,
@@ -567,6 +581,13 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
                         + kv(stop=result.stop.value,
                              calls=result.calls_used,
                              cap=req.max_tool_calls))
+        cache = generator.cache_report()
+        log.info("fix cache " + kv(
+            before=cache_before, after=cache_after["total"],
+            learned=max(0, cache_after["total"] - cache_before),
+            served_warm=cache["routings_served_warm"],
+            calls_saved=cache["calls_saved"]))
+
         if generator.degraded:
             log.warning("search degraded by a failing data source "
                         + kv(failures=len(generator.degraded),
@@ -616,7 +637,8 @@ def _aircraft_from(generator: CorridorGenerator) -> dict[str, Any] | None:
     }
 
 
-def _reputation_for(aircraft: dict | None, db_path: str) -> dict[str, Any]:
+def _reputation_for(aircraft: dict | None, db_path: str,
+                    timings: object | None = None) -> dict[str, Any]:
     """Safety record for the aircraft type, or an explanation of why not.
 
     An unresolvable type returns a stated absence. Falling back to a nearby
@@ -636,7 +658,7 @@ def _reputation_for(aircraft: dict | None, db_path: str) -> dict[str, Any]:
     label = aircraft["variant"] or aircraft["family"]
     try:
         out = run_reputation_search(
-            label, "safety incidents and accidents", 5, db_path)
+            label, "safety incidents and accidents", 5, db_path, timings)
         return {"available": True, "searched_as": label, **out}
     except Exception as e:  # noqa: BLE001
         return {
@@ -646,7 +668,8 @@ def _reputation_for(aircraft: dict | None, db_path: str) -> dict[str, Any]:
 
 
 def run_reputation_search(aircraft_type: str, query: str, k: int,
-                          db_path: str = DEFAULT_DB) -> dict[str, Any]:
+                          db_path: str = DEFAULT_DB,
+                          timings: object | None = None) -> dict[str, Any]:
     """Aircraft reputation lookup over the NTSB index.
 
     Imported lazily: the embedding model takes several seconds to load and
@@ -662,7 +685,7 @@ def run_reputation_search(aircraft_type: str, query: str, k: int,
     conn = connect(path, load_vec=True)
     try:
         out = search_aircraft_reputation(
-            conn, _encoder(), aircraft_type, query, k=k)
+            conn, _timed_encoder(timings), aircraft_type, query, k=k)
         resolved = out.resolved_type
         return {
             "query": {"aircraft_type": aircraft_type, "query": query, "k": k},
@@ -700,6 +723,31 @@ def run_reputation_search(aircraft_type: str, query: str, k: int,
 
 
 _ENCODER = None
+
+
+def _timed_encoder(timings):
+    """Wrap the encoder so its CPU cost is recorded.
+
+    The embedding model is the only real computation this machine performs.
+    Its cost is measured as CPU time rather than wall clock, because wall
+    clock on a shared box measures the scheduler as much as the work.
+
+    Without a timing sink this returns the encoder untouched, so scripts and
+    tests are unaffected.
+    """
+    encoder = _encoder()
+    if timings is None:
+        return encoder
+
+    class _Timed:
+        def encode(self, *args, **kwargs):
+            with timings.track_embedding():
+                return encoder.encode(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(encoder, name)
+
+    return _Timed()
 
 
 def _encoder():

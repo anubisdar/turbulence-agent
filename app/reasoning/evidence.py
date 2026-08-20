@@ -30,7 +30,7 @@ the graph, this module runs the coroutine and hands back plain data.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable, Protocol, Sequence
 
@@ -47,7 +47,6 @@ from app.sources.gairmet import (
     GairmetFetchError,
     TurbulenceAdvisory,
 )
-from app.sources.gairmet import TurbulenceSeverity as ForecastSeverity
 
 #: How far back to look for pilot reports. Beyond this a report is
 #: describing air that has moved on.
@@ -117,6 +116,30 @@ class Report(Protocol):
 #: the network and never start an event loop.
 PirepFetcher = Callable[[tuple[float, float, float, float], int],
                         Sequence[object]]
+
+
+@dataclass
+class ObservedEvidence:
+    """What pilot reports say about a corridor.
+
+    A dataclass rather than a tuple because this used to be a seven-element
+    tuple, and threading a new value through one is easy to forget and
+    silent when you do: `worst_at` was computed, formatted and then dropped
+    on the floor for want of an eighth position. A named field cannot be
+    lost that way, and a caller reading `result.notes` is clearer than one
+    counting underscores.
+    """
+    reading: Severity = Severity.UNRESOLVED
+    count: int = 0
+    mean_age_minutes: float | None = None
+    coverage: float = 0.0
+    notes: list[str] = field(default_factory=list)
+    inside: int = 0
+    considered: int = 0
+    #: Where the worst report came from, as "lat, lon". Useful to a reader
+    #: who wants to know whether the rough air is early or late in the
+    #: flight rather than merely that it exists.
+    worst_at: str | None = None
 
 
 @dataclass
@@ -214,8 +237,7 @@ def coverage_fraction(shape: CorridorShape,
 
 
 def gather_observed(shape: CorridorShape, reports: Iterable,
-                    now: datetime) -> tuple[Severity, int, float | None,
-                                            float, list[str], int, int]:
+                    now: datetime) -> ObservedEvidence:
     """Pilot reports falling inside the corridor, in three dimensions."""
     considered = 0
     inside_points: list[tuple[float, float]] = []
@@ -312,8 +334,10 @@ def gather_observed(shape: CorridorShape, reports: Iterable,
                 f"{worst_reading.value}."
             )
 
-    return (worst_reading, count, mean_age, cov, notes,
-            len(inside_points), considered)
+    return ObservedEvidence(
+        reading=worst_reading, count=count, mean_age_minutes=mean_age,
+        coverage=cov, notes=notes, inside=len(inside_points),
+        considered=considered, worst_at=worst_where)
 
 
 def gather_forecast(shape: CorridorShape,
@@ -529,9 +553,11 @@ def gather_evidence(shape: CorridorShape,
                 f"Pilot reports could not be fetched ({type(e).__name__}). "
                 f"The observed side is unknown, not clear."
             )
-    (obs_reading, obs_count, mean_age, cov,
-     obs_notes, inside, considered) = gather_observed(shape, reports, now)
-    notes.extend(obs_notes)
+    observed = gather_observed(shape, reports, now)
+    obs_reading, obs_count = observed.reading, observed.count
+    mean_age, cov = observed.mean_age_minutes, observed.coverage
+    inside, considered = observed.inside, observed.considered
+    notes.extend(observed.notes)
 
     # ---- forecast
     advisories: Sequence[TurbulenceAdvisory] = []
@@ -574,6 +600,7 @@ def gather_evidence(shape: CorridorShape,
         observation_count=obs_count,
         observed_reading=obs_reading,
         observed_count=obs_count,
+        observed_worst_at=observed.worst_at,
         forecast_reading=fc_reading,
         forecast_count=fc_count,
     )

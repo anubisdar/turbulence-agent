@@ -80,8 +80,12 @@ class TestObservedGathering:
     def test_reports_outside_the_corridor_are_excluded(self, shape):
         reports = [FakeReport(PATH[10], 34000, "light"),
                    FakeReport((25.76, -80.19), 34000, "extreme")]  # Miami
-        reading, count, _, _, _, inside, considered = gather_observed(
+        observed = gather_observed(
             shape, reports, NOW)
+        reading = observed.reading
+        count = observed.count
+        inside = observed.inside
+        considered = observed.considered
         assert considered == 2
         assert inside == 1
         assert reading is Severity.LIGHT
@@ -89,8 +93,11 @@ class TestObservedGathering:
     def test_reports_above_the_altitude_band_are_excluded(self, shape):
         """Laterally inside, vertically elsewhere. Not the same air."""
         reports = [FakeReport(PATH[12], 41000, "severe")]
-        reading, count, _, _, _, inside, _ = gather_observed(
+        observed = gather_observed(
             shape, reports, NOW)
+        reading = observed.reading
+        count = observed.count
+        inside = observed.inside
         assert inside == 0
         assert reading is Severity.UNRESOLVED
 
@@ -99,7 +106,9 @@ class TestObservedGathering:
                    FakeReport(PATH[10], 34000, "light"),
                    FakeReport(PATH[14], 34000, "severe"),
                    FakeReport(PATH[18], 34000, "light")]
-        reading, count, _, _, _, _, _ = gather_observed(shape, reports, NOW)
+        observed = gather_observed(shape, reports, NOW)
+        reading = observed.reading
+        count = observed.count
         assert reading is Severity.SEVERE
         assert count == 4
 
@@ -108,7 +117,9 @@ class TestObservedGathering:
         or four in agreement."""
         reports = [FakeReport(PATH[6], 34000, "light"),
                    FakeReport(PATH[14], 34000, "severe")]
-        _, count, _, _, notes, _, _ = gather_observed(shape, reports, NOW)
+        observed = gather_observed(shape, reports, NOW)
+        count = observed.count
+        notes = observed.notes
         assert count == 2
         assert any("disagree" in n for n in notes)
         assert any("outlier" in n for n in notes)
@@ -116,17 +127,25 @@ class TestObservedGathering:
     def test_agreeing_reports_are_reported_as_agreeing(self, shape):
         reports = [FakeReport(PATH[6], 34000, "light"),
                    FakeReport(PATH[14], 34000, "light")]
-        _, _, _, _, notes, _, _ = gather_observed(shape, reports, NOW)
+        observed = gather_observed(shape, reports, NOW)
+        notes = observed.notes
         assert any("all light" in n for n in notes)
 
     def test_fetched_but_none_inside_is_stated_as_absence(self, shape):
         reports = [FakeReport((25.76, -80.19), 34000, "extreme")]
-        reading, _, _, _, notes, _, _ = gather_observed(shape, reports, NOW)
+        observed = gather_observed(shape, reports, NOW)
+        reading = observed.reading
+        notes = observed.notes
         assert reading is Severity.UNRESOLVED
         assert any("not a report of smooth air" in n for n in notes)
 
     def test_no_reports_at_all(self, shape):
-        reading, count, age, cov, notes, _, _ = gather_observed(shape, [], NOW)
+        observed = gather_observed(shape, [], NOW)
+        reading = observed.reading
+        count = observed.count
+        age = observed.mean_age_minutes
+        cov = observed.coverage
+        notes = observed.notes
         assert reading is Severity.UNRESOLVED
         assert count == 0
         assert cov == 0.0
@@ -136,14 +155,16 @@ class TestObservedGathering:
         """The one place absence could pass without comment. An empty fetch
         used to produce no note at all, which is the failure this project
         exists to avoid."""
-        _, _, _, _, notes, _, _ = gather_observed(shape, [], NOW)
+        observed = gather_observed(shape, [], NOW)
+        notes = observed.notes
         assert notes, "an empty fetch must still be explained"
         assert any("not a report of smooth air" in n for n in notes)
 
     def test_mean_age_is_computed(self, shape):
         reports = [FakeReport(PATH[6], 34000, "light", age_minutes=10),
                    FakeReport(PATH[14], 34000, "light", age_minutes=30)]
-        _, _, age, _, _, _, _ = gather_observed(shape, reports, NOW)
+        observed = gather_observed(shape, reports, NOW)
+        age = observed.mean_age_minutes
         assert age == pytest.approx(20.0, abs=0.1)
 
 
@@ -435,7 +456,9 @@ class TestRejectionReasonsAreDistinguished:
 
     def test_low_level_reports_along_the_route_are_named_as_such(self, shape):
         reports = [FakeReport(PATH[i], 3000, "light") for i in (4, 8, 12, 16)]
-        _, _, _, _, notes, inside, _ = gather_observed(shape, reports, NOW)
+        observed = gather_observed(shape, reports, NOW)
+        notes = observed.notes
+        inside = observed.inside
         assert inside == 0
         text = " ".join(notes)
         assert "along this route" in text
@@ -444,13 +467,15 @@ class TestRejectionReasonsAreDistinguished:
     def test_distant_reports_are_counted_separately(self, shape):
         reports = [FakeReport(PATH[8], 3000, "light"),
                    FakeReport((25.76, -80.19), 34000, "severe")]
-        _, _, _, _, notes, _, _ = gather_observed(shape, reports, NOW)
+        observed = gather_observed(shape, reports, NOW)
+        notes = observed.notes
         text = " ".join(notes)
         assert "surrounding airspace" in text
 
     def test_the_closing_note_never_implies_smooth(self, shape):
         reports = [FakeReport(PATH[8], 3000, "light")]
-        _, _, _, _, notes, _, _ = gather_observed(shape, reports, NOW)
+        observed = gather_observed(shape, reports, NOW)
+        notes = observed.notes
         assert any("not a report of smooth air" in n for n in notes)
 
 
@@ -590,3 +615,42 @@ class TestBoundingBoxAcrossTheDateLine:
         min_lat, min_lon, max_lat, max_lon = bounding_box(shape)
         assert 38 < min_lat < 42
         assert -83 < min_lon < -79
+
+
+class TestTheWorstReportsLocation:
+    """`Evidence.observed_worst_at` was declared and never assigned: the
+    value was computed inside `gather_observed`, formatted as a coordinate,
+    and then dropped for want of an eighth position in a seven-element
+    tuple. The tuple is now a dataclass, which is the point - a named field
+    cannot be lost by miscounting."""
+
+    def _reports(self, *specs):
+        return [FakeReport(PATH[i], alt, sev) for i, alt, sev in specs]
+
+    def test_the_location_of_the_worst_report_is_kept(self, shape):
+        observed = gather_observed(shape, self._reports(
+            (6, 34000, "light"), (14, 34000, "severe"), (18, 34000, "light")),
+            NOW)
+        assert observed.reading is Severity.SEVERE
+        assert observed.worst_at is not None
+
+    def test_it_points_at_the_worst_report_not_the_first(self, shape):
+        observed = gather_observed(shape, self._reports(
+            (4, 34000, "light"), (16, 34000, "severe")), NOW)
+        worst_lat = float(observed.worst_at.split(",")[0])
+        assert worst_lat == pytest.approx(PATH[16][0], abs=0.01)
+
+    def test_it_reaches_the_evidence(self, shape):
+        result = gather_evidence(
+            shape,
+            fetch_pireps=lambda b, h: self._reports((10, 34000, "moderate")),
+            when=NOW)
+        assert result.evidence.observed_worst_at is not None
+
+    def test_it_is_absent_when_nothing_was_reported(self, shape):
+        assert gather_observed(shape, [], NOW).worst_at is None
+
+    def test_a_single_report_is_its_own_worst(self, shape):
+        observed = gather_observed(shape, self._reports((8, 34000, "light")),
+                                   NOW)
+        assert observed.worst_at is not None

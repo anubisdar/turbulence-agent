@@ -130,6 +130,10 @@ class CorridorGenerator:
     #: A search that lost a data source explored less of the tree, and that
     #: is a different thing from a search a budget cut short.
     degraded: list[str] = field(default_factory=list)
+    #: Fix cache effectiveness. A routing that resolves on the first attempt
+    #: needed no donor fetch, which is a metered call the warm cache saved.
+    cache_hits: int = field(default=0)
+    calls_saved: int = field(default=0)
 
     # ------------------------------------------------------------ helpers
 
@@ -137,6 +141,19 @@ class CorridorGenerator:
     def overlap_fn(self):
         """Adapter for the critic's dominance check."""
         return corridor_overlap_fn(self.shapes)
+
+    def cache_report(self) -> dict:
+        """What the fix cache did for this search.
+
+        The claim has always been that route fixes are cached permanently
+        and make later searches of the same pair cheaper. It was measured
+        once, informally, going from five calls to four. This reports it
+        every time instead.
+        """
+        return {
+            "routings_served_warm": self.cache_hits,
+            "calls_saved": self.calls_saved,
+        }
 
     def _note(self, text: str) -> None:
         """Record a note, and log it.
@@ -405,6 +422,13 @@ class CorridorGenerator:
 
         for routing in candidates:
             resolution = resolve_route(self.conn, routing.route)
+
+            # Resolved without a fetch: every waypoint was already known
+            # from an earlier search. That is the saving the cost argument
+            # in the write-ups rests on, counted rather than asserted.
+            if resolution.resolved:
+                self.cache_hits += 1
+                self.calls_saved += 1
 
             # Cold cache: fetch the fixes from a flight that filed this exact
             # routing. One call, and it permanently covers those waypoints.

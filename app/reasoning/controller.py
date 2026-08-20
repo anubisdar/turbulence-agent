@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Protocol, Sequence
 
+from app.logging_setup import get_logger, kv
 from app.reasoning.critic import (
     BeamResult,
     Corridor,
@@ -43,6 +44,8 @@ from app.reasoning.critic import (
     evaluate,
     final_reading,
 )
+
+log = get_logger("controller")
 
 DEFAULT_BEAM_WIDTH = 2
 DEFAULT_DEPTH_LIMIT = 3
@@ -252,6 +255,19 @@ def search(
             break
 
         beam = evaluate(candidates, beam_width=beam_width, overlap_fn=overlap_fn)
+
+        # Logged here rather than in the critic, which is a pure function
+        # with no I/O and stays that way. One line per decision makes
+        # questions like "how often does dominance actually fire" a grep
+        # rather than a guess: the answer has been assumed from a single
+        # observed search since the threshold was first calibrated.
+        for scored in beam.all_scores:
+            log.info("critic decision " + kv(
+                depth=depth,
+                corridor=scored.corridor_id,
+                decision=scored.decision.value,
+                score=round(scored.total, 4),
+                reason=scored.reason or None))
         level.kept = list(beam.kept)
         level.pruned = list(beam.pruned)
         level.notes = list(beam.notes)

@@ -139,7 +139,12 @@ function render(d){
   const pct = searches ? Math.round((t.resolved || 0) / searches * 100) : 0;
   const llmCalls = m.llm_calls || 0;
   const accepted = llmCalls ? Math.round((m.llm_accepted || 0) / llmCalls * 100) : null;
-  const spend = ((m.tokens_in || 0) / 1e6 * 3 + (m.tokens_out || 0) / 1e6 * 15);
+  // Published Sonnet pricing per million tokens at the time of writing.
+  // Hardcoded, so it drifts silently when pricing changes: the figure is an
+  // indicator for spotting a runaway, never a substitute for the console.
+  const PRICE_IN = 3, PRICE_OUT = 15;
+  const spend = ((m.tokens_in || 0) / 1e6 * PRICE_IN
+               + (m.tokens_out || 0) / 1e6 * PRICE_OUT);
 
   $('window').textContent = `last ${d.window_days} days`;
   $('stamp').textContent = new Date().toISOString().slice(11, 16) + ' UTC';
@@ -206,7 +211,7 @@ function render(d){
           <div class="row"><span>tokens in / out</span>
             <b>${n(m.tokens_in)} / ${n(m.tokens_out)}</b></div>
           <div class="row"><span>estimated spend</span>
-            <b>$${spend.toFixed(2)}</b></div>
+            <b>~$${spend.toFixed(2)}</b></div>
           <div class="row"><span>mean latency</span>
             <b>${(m.llm_seconds || 0).toFixed(2)}s</b></div>
           <div class="row"><span>embedding invocations</span>
@@ -214,9 +219,10 @@ function render(d){
           <div class="row"><span>embedding CPU per call</span>
             <b>${(m.embedding_cpu_ms || 0).toFixed(1)} ms</b></div>
         </div>
-        <div class="aside">The language model runs on someone else&rsquo;s hardware, so it has
-          tokens and latency but no CPU figure. The embedding model runs here, so it has
-          CPU and no bill.</div>
+        <div class="aside">The language model (${esc(m.llm_model || 'claude-sonnet-5')})
+          runs on someone else&rsquo;s hardware, so it has tokens and latency but no CPU
+          figure. The embedding model (BAAI/bge-small-en-v1.5) runs here, so it has CPU
+          and no bill.</div>
       </div>
     </div>
 
@@ -245,7 +251,8 @@ function render(d){
       </div>
       <div class="panel">
         <h2>Blocked at the edge</h2>
-        <p class="note">stopped by Caddy, so they never reached the application</p>
+        <p class="note">stopped by the GeoIP filter, which blocks every region
+          outside the US, so they never reached the application</p>
         ${rows(d.blocked, r => r.reason, r => r.n,
                'Edge counts come from the Caddy log and are not wired up yet.')}
       </div>
@@ -309,7 +316,9 @@ function render(d){
 
   charts.push(new Chart($('c-work'), {
     type:'doughnut',
-    data:{labels:['external API calls','embedding (local)','language model'],
+    data:{labels:['external API calls',
+                  'embedding · bge-small-en-v1.5',
+                  `language model · ${m.llm_model || 'claude-sonnet-5'}`],
       datasets:[{data:[t.api_calls || 0, m.embedding_calls || 0, llmCalls],
         backgroundColor:[neutral, good, model], borderWidth:0}]},
     options:{responsive:true, maintainAspectRatio:false, cutout:'60%',

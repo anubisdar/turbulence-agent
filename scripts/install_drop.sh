@@ -193,6 +193,26 @@ fi
 
 # ---------------------------------------------------------------- verify
 
+head_ "Undefined names"
+
+# An import succeeding proves a module loads, not that every line in it
+# runs. A name used where it is not bound sits quiet until that branch
+# executes, which in one case meant reaching production and surfacing as a
+# failed safety lookup on every search. pyflakes finds it in under a second.
+if python3 -c "import pyflakes" 2>/dev/null; then
+  undefined=$(python3 -m pyflakes "$PROJ/app" 2>/dev/null | grep "undefined name" || true)
+  if [[ -n "$undefined" ]]; then
+    err "undefined names found:"
+    printf '  %s\n' "$undefined"
+    err "not installing. Fix these first."
+    exit 1
+  fi
+  say "none"
+else
+  warn "pyflakes is not installed, so undefined names will not be caught."
+  warn "  pip install pyflakes"
+fi
+
 head_ "Import check"
 
 cd "$PROJ"

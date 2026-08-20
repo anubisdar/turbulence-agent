@@ -19,7 +19,7 @@ built rather than carried in state. State holds data; those are behaviour.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Callable, Sequence, TypedDict
+from typing import Any, Callable, Sequence, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
