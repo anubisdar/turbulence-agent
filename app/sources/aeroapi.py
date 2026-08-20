@@ -160,6 +160,9 @@ def parse_distance_to_nm(value) -> float | None:
 
 @dataclass
 class AeroAPIClient:
+    #: Optional timing sink. Set by the service so a search can report where
+    #: its seconds went; None everywhere else so tests and scripts are
+    #: unaffected.
     """Thin wrapper. Counts its own calls so a caller can budget them.
 
     `transport` is injectable so tests never touch the network.
@@ -170,6 +173,7 @@ class AeroAPIClient:
     transport: Transport | None = None
     sleep: Callable[[float], None] = time.sleep
     calls_made: int = 0
+    timings: object | None = None
     call_log: list[str] = field(default_factory=list)
 
     # -------------------------------------------------------------- request
@@ -190,6 +194,17 @@ class AeroAPIClient:
             raw = e.read().decode("utf-8", "replace")
             return e.code, None, raw
 
+    def _timed(self, fn):
+        """Run a call, recording its wall time against the AeroAPI bucket.
+
+        Wall clock rather than CPU: what an external call costs a search is
+        the waiting, and that is the number worth putting on a chart.
+        """
+        if self.timings is None:
+            return fn()
+        with self.timings.track("aeroapi"):
+            return fn()
+
     def request(self, path: str, params: dict | None = None,
                 _retried: bool = False) -> dict:
         params = params or {}
@@ -197,17 +212,20 @@ class AeroAPIClient:
 
         self.calls_made += 1
         self.call_log.append(path)
-        status, body, raw = transport(path, params)
+        # Timed here rather than around the whole method: retries and the
+        # inter-call spacing sleep are part of what a search waits for, and
+        # both happen below this line.
+        status, body, raw = self._timed(lambda: transport(path, params))
 
         if status == 200 and body is not None:
             if self.spacing_seconds:
-                self.sleep(self.spacing_seconds)
+                self._timed(lambda: self.sleep(self.spacing_seconds))
             return body
 
         if status == 429:
             if _retried:
                 raise RateLimited(f"rate limited twice on {path}")
-            self.sleep(RATE_LIMIT_BACKOFF_SECONDS)
+            self._timed(lambda: self.sleep(RATE_LIMIT_BACKOFF_SECONDS))
             return self.request(path, params, _retried=True)
 
         if status == 401:

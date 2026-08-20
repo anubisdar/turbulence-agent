@@ -181,16 +181,20 @@ function render(d){
         <h2>Where the time goes</h2>
         <p class="note">mean seconds per search, by component</p>
         <div class="chart short"><canvas id="c-timing"></canvas></div>
-        <div class="aside accent">Scoring is ${(tim.scoring || 0).toFixed(2)}s of
-          ${(d.median_seconds || 0).toFixed(1)}s. The part that decides the answer is
-          the part that costs nothing.</div>
+        <div class="aside accent">${
+          (tim.aeroapi || 0) > 0
+            ? `Waiting on flight data is ${((tim.aeroapi || 0) /
+                 ((d.median_seconds || 1))*100).toFixed(0)}% of a search. The part that
+               decides the answer is the part that costs almost nothing.`
+            : 'Flight and weather calls are not timed on this build, so everything '
+              + 'unmeasured lands in the last bucket.'}</div>
       </div>
     </div>
 
     <div class="grid g2">
       <div class="panel">
         <h2>Where the work happens</h2>
-        <p class="note">component invocations across every search</p>
+        <p class="note">external calls against local model invocations</p>
         <div class="chart"><canvas id="c-work"></canvas></div>
       </div>
       <div class="panel">
@@ -236,7 +240,8 @@ function render(d){
         <h2>Where requests come from</h2>
         <p class="note">country only, resolved at write time</p>
         ${rows(d.countries, r => r.country, r => r.n,
-               'No country data. The GeoIP database may not be readable.')}
+               'No country data yet. Searches recorded before this build did '
+               + 'not carry one.')}
       </div>
       <div class="panel">
         <h2>Blocked at the edge</h2>
@@ -294,7 +299,7 @@ function render(d){
       {label:`AWC ${(tim.awc||0).toFixed(1)}s`, data:[tim.awc||0], backgroundColor:good, stack:'a'},
       {label:`explainer ${(tim.explainer||0).toFixed(1)}s`, data:[tim.explainer||0], backgroundColor:model, stack:'a'},
       {label:`retrieval ${(tim.retrieval||0).toFixed(2)}s`, data:[tim.retrieval||0], backgroundColor:caution, stack:'a'},
-      {label:`scoring ${(tim.scoring||0).toFixed(2)}s`, data:[tim.scoring||0], backgroundColor:neutral, stack:'a'}]},
+      {label:`other ${(tim.scoring||0).toFixed(2)}s`, data:[tim.scoring||0], backgroundColor:neutral, stack:'a'}]},
     options:{indexAxis:'y', responsive:true, maintainAspectRatio:false,
       plugins:{legend}, scales:{
         x:{stacked:true, grid:{color:rule}, border:{display:false},
@@ -304,7 +309,7 @@ function render(d){
 
   charts.push(new Chart($('c-work'), {
     type:'doughnut',
-    data:{labels:['deterministic scoring','embedding (local)','language model'],
+    data:{labels:['external API calls','embedding (local)','language model'],
       datasets:[{data:[t.api_calls || 0, m.embedding_calls || 0, llmCalls],
         backgroundColor:[neutral, good, model], borderWidth:0}]},
     options:{responsive:true, maintainAspectRatio:false, cutout:'60%',

@@ -318,6 +318,8 @@ class GairmetClient:
     """
     transport: Transport | None = None
     calls_made: int = 0
+    #: Optional timing sink, set by the service. See AeroAPIClient.
+    timings: object | None = None
 
     def fetch(self) -> list[TurbulenceAdvisory]:
         """Current turbulence G-AIRMETs.
@@ -328,7 +330,11 @@ class GairmetClient:
         """
         transport = self.transport or _http
         self.calls_made += 1
-        status, body, raw = transport(GAIRMET_PATH, {"format": "json"})
+        if self.timings is not None:
+            with self.timings.track("awc"):
+                status, body, raw = transport(GAIRMET_PATH, {"format": "json"})
+        else:
+            status, body, raw = transport(GAIRMET_PATH, {"format": "json"})
 
         if status == 204:
             return []

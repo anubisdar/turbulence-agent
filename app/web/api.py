@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -313,7 +313,7 @@ def health() -> dict:
 
 
 @app.post("/api/search/corridors", tags=["corridors"])
-def corridor_search(body: CorridorSearchBody) -> dict:
+def corridor_search(body: CorridorSearchBody, request: Request) -> dict:
     """Run the Tree-of-Thought corridor search.
 
     Returns the corridors as GeoJSON with scores and prune reasons attached,
@@ -321,8 +321,13 @@ def corridor_search(body: CorridorSearchBody) -> dict:
     trace, and every note the generator and controller raised.
     """
     try:
-        return run_corridor_search(body.clamped().to_request(),
-                                   _api_key(), _db_path())
+        req = body.clamped().to_request()
+        # Used to resolve a country and then dropped. Behind a proxy the
+        # socket address is Caddy, so the forwarded header is the only place
+        # the real client appears.
+        req.client_ip = (request.headers.get("x-forwarded-for")
+                         or (request.client.host if request.client else None))
+        return run_corridor_search(req, _api_key(), _db_path())
     except ServiceError as e:
         # ServiceError messages are written for the caller and carry no
         # upstream text, so they are safe to return.

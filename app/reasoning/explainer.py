@@ -123,6 +123,11 @@ class AnthropicClient:
                                                timeout=self.timeout)
         return self._client
 
+    #: Token counts from the last call. The API returns these on every
+    #: response and they were being discarded with the rest of the object,
+    #: which left the only measure of what this agent costs unavailable.
+    last_usage: dict = field(default_factory=dict)
+
     def complete(self, system: str, user: str) -> str:
         message = self._load().messages.create(
             model=self.model,
@@ -130,6 +135,11 @@ class AnthropicClient:
             system=system,
             messages=[{"role": "user", "content": user}],
         )
+        usage = getattr(message, "usage", None)
+        self.last_usage = {
+            "tokens_in": getattr(usage, "input_tokens", None),
+            "tokens_out": getattr(usage, "output_tokens", None),
+        }
         return "".join(block.text for block in message.content
                        if getattr(block, "type", None) == "text").strip()
 
@@ -250,6 +260,8 @@ class Explanation:
     text: str
     source: str                 # "model" or "deterministic"
     model: str | None = None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
     rejected: list[str] = field(default_factory=list)
     facts: dict[str, Any] = field(default_factory=dict)
     #: What the model actually wrote when its output was rejected. Kept so
@@ -302,8 +314,13 @@ def explain(payload: dict[str, Any], client: ModelClient | None = None,
         return Explanation(text=fallback, source="deterministic", facts=facts,
                            rejected=verdict.reasons, discarded_text=text.strip())
 
+    usage = getattr(client, "last_usage", None) or {}
     log.info("explainer output accepted "
              + kv(reading=facts.get("reading"), words=len(text.split()),
+                  tokens_in=usage.get("tokens_in"),
+                  tokens_out=usage.get("tokens_out"),
                   model=model_name or DEFAULT_MODEL))
     return Explanation(text=text.strip(), source="model",
-                       model=model_name or DEFAULT_MODEL, facts=facts)
+                       model=model_name or DEFAULT_MODEL, facts=facts,
+                       tokens_in=usage.get("tokens_in"),
+                       tokens_out=usage.get("tokens_out"))

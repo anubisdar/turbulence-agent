@@ -342,7 +342,8 @@ def _explain(payload: dict[str, Any], enabled: bool) -> dict[str, Any]:
     if note:
         rejected.append(note)
     return {"text": out.text, "source": out.source, "model": out.model,
-            "rejected": rejected, "enabled": True}
+            "rejected": rejected, "enabled": True,
+            "tokens_in": out.tokens_in, "tokens_out": out.tokens_out}
 
 
 def _turbulence_summary(result: SearchResult, generator) -> dict[str, Any]:
@@ -438,6 +439,8 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
 
         fetch_pireps, gairmet_client, wx_notes = _turbulence_sources(
             req.include_turbulence)
+        if gairmet_client is not None:
+            gairmet_client.timings = timings
 
         generator = CorridorGenerator(
             client=client, conn=conn,
@@ -529,9 +532,15 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
         explain_started = time.perf_counter()
         payload["explanation"] = _explain(payload, req.include_explanation)
         timings.explainer_seconds = round(time.perf_counter() - explain_started, 4)
+        # Everything not attributed to a named source. Called what it is:
+        # an earlier version labelled this "scoring", which made the chart
+        # claim the deterministic core was the slowest part of the system
+        # when it was really absorbing every unmeasured call.
         timings.scoring_seconds = round(
             max(0.0, (result.elapsed or 0)
-                - timings.aeroapi_seconds - timings.awc_seconds), 4)
+                - timings.aeroapi_seconds
+                - timings.awc_seconds
+                - timings.retrieval_seconds), 4)
 
         # One row per search, so the agent's behaviour can be asked
         # questions rather than only described. Never allowed to fail a
