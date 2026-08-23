@@ -229,11 +229,20 @@ def kv(**fields: Any) -> str:
 
     Values containing spaces are quoted; None is dropped rather than logged
     as the string "None", which reads as a value rather than an absence.
+
+    Inner quotes and backslashes are escaped. Without that, a value that
+    itself contains a quote - a JSON payload, or a model response using
+    quotation marks - closes the field early and produces a line no parser
+    can read back, including the one that reads these lines live.
     """
     parts = []
     for key, value in fields.items():
         if value is None:
             continue
         text = str(value)
-        parts.append(f'{key}="{text}"' if " " in text else f"{key}={text}")
+        if " " in text or '"' in text:
+            escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+            parts.append(f'{key}="{escaped}"')
+        else:
+            parts.append(f"{key}={text}")
     return " ".join(parts)

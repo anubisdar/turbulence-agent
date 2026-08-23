@@ -198,3 +198,57 @@ class TestFallback:
         get_logger("child.one").info("from a child")
         assert "from a child" in buf.getvalue()
         assert f"{APP_NAME}.child.one" in buf.getvalue()
+
+
+class TestKvEscaping:
+    """`kv()` wrapped values in quotes without escaping inner ones, so any
+    value containing a quote closed the field early and produced a line no
+    parser could read back. A JSON payload does. So does a model response
+    using quotation marks."""
+
+    def test_a_value_with_an_inner_quote_round_trips(self):
+        import json
+        import re
+
+        from app.logging_setup import kv
+
+        payload = {"route": "KPIT to KBOS",
+                   "summary": 'the crew called it "light"'}
+        line = kv(facts=json.dumps(payload), words=34)
+
+        field = re.compile(r'(\w+)=("((?:[^"\\]|\\.)*)"|\S+)')
+        parsed = {}
+        for key, raw, quoted in field.findall(line):
+            parsed[key] = (quoted.replace('\\"', '"').replace("\\\\", "\\")
+                           if raw.startswith('"') else raw)
+
+        assert json.loads(parsed["facts"]) == payload
+        assert parsed["words"] == "34"
+
+    def test_a_backslash_survives(self):
+        import re
+
+        from app.logging_setup import kv
+
+        line = kv(path="C:\\some path\\file")
+        match = re.search(r'path="((?:[^"\\]|\\.)*)"', line)
+        assert match
+        assert match.group(1).replace("\\\\", "\\") == "C:\\some path\\file"
+
+    def test_a_plain_value_is_still_unquoted(self):
+        """Quoting everything would make the common case harder to grep."""
+        from app.logging_setup import kv
+
+        assert kv(reading="moderate", count=3) == "reading=moderate count=3"
+
+    def test_none_is_still_dropped(self):
+        from app.logging_setup import kv
+
+        assert "missing" not in kv(reading="light", missing=None)
+
+    def test_redaction_still_applies_to_quoted_values(self):
+        """Escaping must not create a path around the credential filter."""
+        from app.logging_setup import redact
+
+        line = 'facts="{\\"key\\": \\"sk-ant-api03-SECRETVALUE123456\\"}"'
+        assert "SECRETVALUE123456" not in redact(line)

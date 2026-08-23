@@ -258,3 +258,78 @@ class TestRejectedOutputIsRecoverable:
         bad = GOOD_MODERATE + " Some segments could see severe conditions."
         explain(payload(), client=FakeClient(reply=bad))
         assert "Some segments could see severe" in buf.getvalue()
+
+
+class TestComparativesAreNotClaims:
+    """Observed in production, and found within an hour of building the
+    debug watcher.
+
+    A paragraph that correctly reported moderate, explained that three
+    pilot reports said smooth while the forecast said moderate, gave the
+    30% coverage caveat and described the FAA sensations was discarded in
+    full. The rule it broke was "names a severity the evidence does not
+    hold: 'severe'", and the phrase that triggered it was:
+
+        "the more severe of the two, moderate, is the one used"
+
+    That is a comparison between two readings already named. It is not a
+    claim that conditions are severe. The cost of the false positive was a
+    better explanation than the deterministic fallback that replaced it.
+    """
+
+    FACTS = {
+        "route": "KIAD to KSEA", "reading": "moderate",
+        "pilot_reports": {"reading": "smooth", "count": 3},
+        "forecast": {"reading": "moderate", "count": 1},
+        "sources_disagree": True, "route_coverage_fraction": 0.3,
+    }
+
+    def _reasons(self, text, facts=None):
+        return validate(text, facts or self.FACTS).reasons
+
+    def test_the_real_paragraph_is_accepted(self):
+        text = (
+            "For your route from KIAD to KSEA the assessment lands on a "
+            "moderate reading. The sources disagree: three pilot reports "
+            "described smooth conditions while a single forecast called for "
+            "moderate turbulence. Because those two do not match, the more "
+            "severe of the two, moderate, is the one used rather than "
+            "splitting the difference. The pilot reports cover only about "
+            "30% of the route, so most of the flight path has no direct "
+            "observation behind it.")
+        assert not [r for r in self._reasons(text) if "severe" in r]
+
+    def test_a_comparative_with_than_is_accepted(self):
+        text = ("The forecast is more severe than the pilot reports, so "
+                "moderate is the reading used here, and the sources "
+                "disagree. Coverage is thin across this route at 30%.")
+        assert not [r for r in self._reasons(text) if "severe" in r]
+
+    def test_an_invented_severity_is_still_caught(self):
+        text = ("Severe turbulence is expected along this route at cruise "
+                "altitude, and the sources disagree about the details of "
+                "the conditions along the way.")
+        assert any("severe" in r for r in self._reasons(text))
+
+    def test_a_prediction_shaped_like_a_comparative_is_still_caught(self):
+        """"more severe turbulence" predicts; it does not compare two
+        things already named, so the exemption must not reach it."""
+        text = ("Expect more severe turbulence later in the flight, though "
+                "the sources disagree and coverage is thin at 30% of the "
+                "route.")
+        assert any("severe" in r for r in self._reasons(text))
+
+    def test_extreme_is_treated_the_same_way(self):
+        text = ("Conditions may become extreme near the mountains, and the "
+                "sources disagree about this route at 30% coverage.")
+        assert any("extreme" in r for r in self._reasons(text))
+
+    def test_the_not_smooth_exemption_still_works(self):
+        facts = dict(self.FACTS, reading="unresolved", sources_disagree=False,
+                     pilot_reports={"reading": "unresolved", "count": 0},
+                     forecast={"reading": "unresolved", "count": 0})
+        text = ("Nothing is known about the air on this route. No pilot "
+                "reports were filed and no forecast covers it. Unresolved "
+                "is not smooth, and this absence is not a finding of calm "
+                "air along the way.")
+        assert not [r for r in self._reasons(text, facts) if "smooth" in r]

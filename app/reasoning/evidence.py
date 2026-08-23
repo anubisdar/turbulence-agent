@@ -340,6 +340,66 @@ def gather_observed(shape: CorridorShape, reports: Iterable,
         considered=considered, worst_at=worst_where)
 
 
+def _flight_level(feet: int | None) -> str:
+    """Feet as a flight level, the unit an advisory is issued in."""
+    return f"FL{(feet or 0) // 100:03d}"
+
+
+def _describe_vertical_miss(near_miss: Sequence[TurbulenceAdvisory],
+                            shape: CorridorShape,
+                            considered: int) -> str:
+    """Explain an advisory that covers the route laterally but not vertically.
+
+    This is the case worth naming precisely. The advisory is real, it is
+    active, and the route passes straight through its footprint - so an
+    implementation testing the polygon alone would report its severity. It
+    would be describing air thousands of feet from the aircraft.
+
+    Saying only "none cover this corridor at its altitudes" wastes that.
+    The numbers make the point without the system having to claim anything
+    about itself, and they show how close the miss was: a five hundred foot
+    gap and a seven thousand foot gap read identically otherwise.
+    """
+    count = len(near_miss)
+    plural = "" if count == 1 else "s"
+    covers = "covers" if count == 1 else "cover"
+    sits = "sits" if count == 1 else "sit"
+    cruise = (f"this corridor cruises {_flight_level(shape.altitude_min_ft)} "
+              f"to {_flight_level(shape.altitude_max_ft)}")
+
+    tops = [a.top_ft for a in near_miss if a.top_ft is not None]
+    bases = [a.base_ft for a in near_miss if a.base_ft is not None]
+    low = shape.altitude_min_ft
+    high = shape.altitude_max_ft
+
+    if tops and low is not None and max(tops) < low:
+        reach = ("it reaches an altitude of" if count == 1
+                 else "the highest reaches an altitude of")
+        gap = low - max(tops)
+        return (
+            f"{count} turbulence forecast{plural} {covers} this route on "
+            f"the ground but not in the air: {reach} "
+            f"{_flight_level(max(tops))}, and {cruise} - a gap of about "
+            f"{gap:,} feet. No forecast is not a forecast of smooth air."
+        )
+
+    if bases and high is not None and min(bases) > high:
+        begins = ("it begins at" if count == 1 else "the lowest begins at")
+        gap = min(bases) - high
+        return (
+            f"{count} turbulence forecast{plural} {covers} this route on "
+            f"the ground but {sits} above it: {begins} "
+            f"{_flight_level(min(bases))}, and {cruise} - a gap of about "
+            f"{gap:,} feet. No forecast is not a forecast of smooth air."
+        )
+
+    return (
+        f"{count} turbulence forecast{plural} {covers} this route on the "
+        f"ground but not at the altitudes it flies, and {cruise}. No forecast is "
+        f"not a forecast of smooth air."
+    )
+
+
 def gather_forecast(shape: CorridorShape,
                     advisories: Sequence[TurbulenceAdvisory],
                     ) -> tuple[Severity, int, list[str], int, int]:
@@ -348,26 +408,36 @@ def gather_forecast(shape: CorridorShape,
     matched: list[TurbulenceAdvisory] = []
     notes: list[str] = []
 
+    # Advisories that cover the route on the ground but not in the air are
+    # tracked separately. They are the interesting near miss: a system
+    # testing the polygon alone would report turbulence from them, and be
+    # describing air the aircraft is nowhere near.
+    near_miss: list[TurbulenceAdvisory] = []
+
     for a in advisories or []:
         if not a.usable:
-            continue
-        if not a.overlaps_band(shape.altitude_min_ft, shape.altitude_max_ft):
             continue
         # Polygon intersection, not vertex containment. A G-AIRMET is
         # usually far larger than a 25 nm corridor, so an advisory that
         # completely covers the route has every vertex outside it.
-        if intersects_ring(shape, a.ring):
-            matched.append(a)
+        if not intersects_ring(shape, a.ring):
+            continue
+        if not a.overlaps_band(shape.altitude_min_ft, shape.altitude_max_ft):
+            near_miss.append(a)
+            continue
+        matched.append(a)
 
     reading = worst(*[to_critic_severity(
         getattr(a.severity, "value", a.severity)) for a in matched]) \
         if matched else Severity.UNRESOLVED
 
-    if considered and not matched:
+    if near_miss and not matched:
+        notes.append(_describe_vertical_miss(near_miss, shape, considered))
+    elif considered and not matched:
         notes.append(
-            f"{considered} turbulence forecast(s) were active but none cover "
-            f"this corridor at its altitudes. No forecast is not a forecast "
-            f"of smooth air."
+            f"{considered} turbulence forecast(s) were active but none of "
+            f"them covers this route. No forecast is not a forecast of "
+            f"smooth air."
         )
     elif matched:
         bands = ", ".join(

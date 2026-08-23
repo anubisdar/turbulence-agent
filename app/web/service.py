@@ -39,7 +39,13 @@ from app.logging_setup import (
     request_context,
     trip_fields,
 )
-from app.runs import Timings, from_payload, init_runs, record_run, resolve_country
+from app.runs import (
+    Timings,
+    from_payload,
+    init_runs,
+    record_run,
+    resolve_origin,
+)
 from app.reasoning.controller import Budget, SearchResult, search
 from app.reasoning.critic import Corridor
 from app.reasoning.generator import CorridorGenerator
@@ -564,7 +570,7 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
             init_runs(runs_conn)
             record_run(runs_conn, from_payload(
                 payload, request_id, timings,
-                country=resolve_country(req.client_ip)))
+                origin_info=resolve_origin(req.client_ip)))
             runs_conn.close()
         except Exception as e:  # noqa: BLE001
             log.warning("could not record the run " + kv(error=type(e).__name__))

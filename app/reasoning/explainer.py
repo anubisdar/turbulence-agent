@@ -232,6 +232,20 @@ def validate(text: str, facts: dict[str, Any]) -> Verdict:
             # that the air is smooth.
             if word == "smooth" and re.search(r"not smooth|isn.t smooth", low):
                 continue
+
+            # A comparison between two named readings is not a claim about
+            # a third. Observed in production: a paragraph that correctly
+            # reported moderate, explained the disagreement and gave the
+            # coverage caveat was discarded for the phrase "the more severe
+            # of the two, moderate, is the one used".
+            #
+            # Narrow deliberately. The comparative has to be followed by
+            # "of" or "than", so it is comparing things already named.
+            # "more severe turbulence is expected" predicts rather than
+            # compares and still fails.
+            if re.search(rf"\b(?:more|less|most)\s+{word}\s+(?:of|than)\b",
+                         low):
+                continue
             reasons.append(f"names a severity the evidence does not hold: "
                            f"{word!r}")
 
@@ -272,6 +286,25 @@ class Explanation:
     discarded_text: str | None = None
 
 
+def _log_exchange(facts: dict, text: str | None) -> None:
+    """Record what went to the model and what came back.
+
+    Off unless TURBULENCE_LOG_EXPLAINER_IO is set, for the same reason trip
+    content is off: the facts carry the route, and origin plus destination
+    plus a time is an itinerary.
+
+    A rejected response is already logged in full, because studying the
+    failure mode is the point of keeping it. This adds the two halves that
+    were missing: the prompt, and the text of a response that was accepted.
+    """
+    if os.environ.get("TURBULENCE_LOG_EXPLAINER_IO", "").lower() not in (
+            "1", "true", "yes"):
+        return
+    log.info("explainer prompt " + kv(facts=json.dumps(facts, default=str)))
+    if text is not None:
+        log.info("explainer response " + kv(text=text.strip()))
+
+
 def explain(payload: dict[str, Any], client: ModelClient | None = None,
             model_name: str | None = None) -> Explanation:
     """Write the passenger-facing paragraph, or fall back to the plain one.
@@ -306,6 +339,7 @@ def explain(payload: dict[str, Any], client: ModelClient | None = None,
         # thing this agent produces. Log the reasons at warning and the
         # text itself at info, so a reviewer can see what was nearly shown
         # rather than only which rule caught it.
+        _log_exchange(facts, None)
         log.warning("explainer output rejected "
                     + kv(reasons="; ".join(verdict.reasons),
                          reading=facts.get("reading"),
@@ -314,6 +348,7 @@ def explain(payload: dict[str, Any], client: ModelClient | None = None,
         return Explanation(text=fallback, source="deterministic", facts=facts,
                            rejected=verdict.reasons, discarded_text=text.strip())
 
+    _log_exchange(facts, text)
     usage = getattr(client, "last_usage", None) or {}
     log.info("explainer output accepted "
              + kv(reading=facts.get("reading"), words=len(text.split()),

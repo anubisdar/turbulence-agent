@@ -29,6 +29,7 @@ import os
 import sqlite3
 import time
 from contextlib import contextmanager
+from collections import namedtuple
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
@@ -45,6 +46,9 @@ CREATE TABLE IF NOT EXISTS search_runs (
     origin              TEXT,
     dest                TEXT,
     country             TEXT,
+    region              TEXT,
+    asn_number          TEXT,
+    asn_name            TEXT,
 
     -- outcome
     reading             TEXT,
@@ -89,6 +93,16 @@ CREATE INDEX IF NOT EXISTS idx_runs_started ON search_runs(started_at);
 """
 
 
+#: Columns added after the table first shipped. Anything here is applied to
+#: an existing table on start; anything in SCHEMA alone reaches only a fresh
+#: one.
+_EXPECTED_COLUMNS = {
+    "region": "TEXT",
+    "asn_number": "TEXT",
+    "asn_name": "TEXT",
+}
+
+
 @dataclass
 class RunRecord:
     """Everything worth keeping about one search."""
@@ -98,6 +112,9 @@ class RunRecord:
     origin: str | None = None
     dest: str | None = None
     country: str | None = None
+    region: str | None = None
+    asn_number: str | None = None
+    asn_name: str | None = None
 
     reading: str | None = None
     observed_reading: str | None = None
@@ -189,35 +206,116 @@ class Timings:
 
 
 def init_runs(conn: sqlite3.Connection) -> None:
+    """Create the table, and add any column a newer build expects.
+
+    `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so a
+    deployment that adds a column finds the old shape still in place and
+    fails on the first query that mentions it - a 500 on the status page
+    rather than anything visible at install time.
+
+    SQLite has no `ADD COLUMN IF NOT EXISTS`, so the existing columns are
+    read and the difference applied. Adding a column is cheap, backfills
+    NULL, and is safe to run on every start.
+    """
     conn.executescript(SCHEMA)
+
+    existing = {row[1] for row in conn.execute(
+        "PRAGMA table_info(search_runs)")}
+    for column, kind in _EXPECTED_COLUMNS.items():
+        if column not in existing:
+            conn.execute(
+                f"ALTER TABLE search_runs ADD COLUMN {column} {kind}")
     conn.commit()
 
 
-def resolve_country(ip: str | None,
-                    db_path: str = "/usr/share/GeoIP/GeoLite2-Country.mmdb"
-                    ) -> str | None:
-    """A two-letter country code, or None.
+#: Where the MaxMind databases live once update-geoip.sh has run.
+GEOIP_DIR = os.environ.get("TURBULENCE_GEOIP_DIR", "/usr/share/GeoIP")
 
-    The address is used and discarded. Nothing here returns it, and nothing
-    stores it: the dashboard asks which countries reach the site, which a
-    country code answers without identifying anyone.
-    """
-    if not ip:
-        return None
+#: A resolved network, deliberately coarse. See resolve_origin.
+Origin = namedtuple(
+    "Origin", "country country_name region asn_number asn_name")
+UNKNOWN_ORIGIN = Origin(None, None, None, None, None)
+
+
+def _lookup(ip: str, filename: str) -> dict | None:
     try:
         import maxminddb
     except ImportError:
         return None
-    if not os.path.exists(db_path):
+    path = os.path.join(GEOIP_DIR, filename)
+    if not os.path.exists(path):
         return None
     try:
-        with maxminddb.open_database(db_path) as reader:
-            found = reader.get(ip.split(",")[0].strip())
-        if isinstance(found, dict):
-            return (found.get("country") or {}).get("iso_code")
+        with maxminddb.open_database(path) as reader:
+            found = reader.get(ip)
+        return found if isinstance(found, dict) else None
     except (ValueError, OSError):
         return None
-    return None
+
+
+def resolve_origin(ip: str | None) -> Origin:
+    """Where a request came from, at a deliberately coarse resolution.
+
+    The address is used and discarded. Nothing here returns it and nothing
+    stores it, which is the rule the threat model settled on: an address
+    plus a route is closer to personal data than either alone.
+
+    REGION, NOT CITY. City was considered and rejected twice over. On free
+    GeoLite2 it is frequently the registrant's address rather than the
+    user's, so the chart would be confidently wrong; and city plus a
+    timestamp on a site with this little traffic identifies a person, which
+    is the thing the address was withheld to avoid. A US state is accurate
+    and coarse enough to stay on the right side of that.
+
+    THE NETWORK IS THE USEFUL PART. Country answers nothing when every
+    other country is blocked at the edge. What actually distinguishes
+    traffic is whose network it arrives from: a request from AS16509
+    (Amazon) is automation, one from AS7922 (Comcast) is a person on a
+    domestic line. That is the question the panel is really asking.
+    """
+    if not ip:
+        return UNKNOWN_ORIGIN
+
+    address = ip.split(",")[0].strip()
+    if not address:
+        return UNKNOWN_ORIGIN
+
+    country = country_name = region = asn_number = asn_name = None
+
+    # The databases carry the country's name alongside its code, so nothing
+    # here needs a hand-maintained table of 250 entries that would drift.
+    # The code is what gets stored - it is stable and compact - and the name
+    # is what gets displayed.
+    city = _lookup(address, "GeoLite2-City.mmdb")
+    if city:
+        found = city.get("country") or {}
+        country = found.get("iso_code")
+        country_name = (found.get("names") or {}).get("en")
+        subdivisions = city.get("subdivisions") or []
+        if subdivisions:
+            names = (subdivisions[0].get("names") or {})
+            region = names.get("en") or subdivisions[0].get("iso_code")
+
+    if country is None:
+        found = (_lookup(address, "GeoLite2-Country.mmdb") or {})
+        found = found.get("country") or {}
+        country = found.get("iso_code")
+        country_name = country_name or (found.get("names") or {}).get("en")
+
+    asn = _lookup(address, "GeoLite2-ASN.mmdb")
+    if asn:
+        number = asn.get("autonomous_system_number")
+        asn_number = f"AS{number}" if number is not None else None
+        asn_name = asn.get("autonomous_system_organization")
+
+    return Origin(country, country_name or country, region,
+                  asn_number, asn_name)
+
+
+def resolve_country(ip: str | None,
+                    db_path: str | None = None) -> str | None:
+    """Kept for callers that only want the country."""
+    return resolve_origin(ip).country
 
 
 def record_run(conn: sqlite3.Connection, run: RunRecord,
@@ -248,7 +346,8 @@ def record_run(conn: sqlite3.Connection, run: RunRecord,
 
 def from_payload(payload: dict[str, Any], request_id: str,
                  timings: Timings | None = None,
-                 country: str | None = None) -> RunRecord:
+                 country: str | None = None,
+                 origin_info: "Origin | None" = None) -> RunRecord:
     """Build a record from a finished search payload."""
     request = payload.get("request") or {}
     outcome = payload.get("outcome") or {}
@@ -266,7 +365,10 @@ def from_payload(payload: dict[str, Any], request_id: str,
         request_id=request_id,
         origin=request.get("origin") if log_trip else None,
         dest=request.get("dest") if log_trip else None,
-        country=country,
+        country=(origin_info.country if origin_info else country),
+        region=(origin_info.region if origin_info else None),
+        asn_number=(origin_info.asn_number if origin_info else None),
+        asn_name=(origin_info.asn_name if origin_info else None),
         reading=outcome.get("reading"),
         observed_reading=(wx.get("observed") or {}).get("reading"),
         forecast_reading=(wx.get("forecast") or {}).get("reading"),
@@ -380,10 +482,18 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
         WHERE started_at >= ? AND degraded_reason IS NOT NULL
         GROUP BY reason ORDER BY n DESC LIMIT 6""", (since,))
 
-    countries = _rows(conn, """
-        SELECT country, COUNT(*) AS n FROM search_runs
-        WHERE started_at >= ? AND country IS NOT NULL
-        GROUP BY country ORDER BY n DESC LIMIT 8""", (since,))
+    regions = _rows(conn, """
+        SELECT COALESCE(region, country, 'unknown') AS region,
+               COUNT(*) AS n
+        FROM search_runs WHERE started_at >= ?
+        GROUP BY region ORDER BY n DESC LIMIT 8""", (since,))
+
+    networks = _rows(conn, """
+        SELECT COALESCE(asn_name, 'unknown') AS network,
+               COALESCE(asn_number, '') AS asn,
+               COUNT(*) AS n
+        FROM search_runs WHERE started_at >= ?
+        GROUP BY network, asn ORDER BY n DESC LIMIT 8""", (since,))
 
     return {
         "window_days": days,
@@ -395,5 +505,6 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
         "models": models,
         "rejections": rejections,
         "degraded": degraded,
-        "countries": countries,
+        "regions": regions,
+        "networks": networks,
     }

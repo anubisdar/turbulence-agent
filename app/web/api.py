@@ -20,6 +20,7 @@ empty airport pair. Same code path, same stack, just not fetched live.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
 
+from app.runs import resolve_origin
 from app.logging_setup import (
     current_request_id,
     get_logger,
@@ -277,39 +279,98 @@ def status(days: int = 30) -> dict:
     except Exception as e:  # noqa: BLE001
         raise _fail(e)
 
-    data["blocked"] = _edge_blocks()
+    edge = _edge_blocks()
+    data["blocked"] = edge["counts"]
+    data["blocked_countries"] = edge["countries"]
+    data["blocked_note"] = edge["note"]
     return data
 
 
-def _edge_blocks() -> list[dict]:
+def _edge_blocks() -> dict:
     """Requests Caddy stopped before they reached this application.
 
     A different source from everything else on the page, because a blocked
-    request never becomes a search and so never becomes a row. Reading the
-    tail is enough: this answers "is the edge doing anything", not "how
-    much", and parsing a large log on every page load would make the
-    dashboard slower than the thing it describes.
+    request never becomes a search and so never becomes a row.
+
+    Returns a reason when it cannot read rather than an empty result. An
+    earlier version caught OSError and returned nothing, so a log the app
+    lacked permission to open reported as a quiet edge - which is the same
+    mistake as reading missing weather data as calm air, in a different
+    place.
     """
     path = os.environ.get("TURBULENCE_CADDY_LOG", "/var/log/caddy/access.log")
-    counts = {"geo filter": 0, "rate limit": 0}
+
+    if not os.path.exists(path):
+        return {"readable": False, "note": f"no access log at {path}",
+                "counts": [], "countries": []}
+    if not os.access(path, os.R_OK):
+        return {"readable": False,
+                "note": ("the access log is not readable by this service. "
+                         "Caddy creates it mode 600; add `mode 644` to the "
+                         "log output block."),
+                "counts": [], "countries": []}
+
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
             fh.seek(max(0, fh.tell() - 400_000))
             tail = fh.read().decode("utf-8", "replace")
-    except (OSError, ValueError):
-        return []
+    except OSError as e:
+        return {"readable": False, "note": f"{type(e).__name__} reading {path}",
+                "counts": [], "countries": []}
 
-    # 401 is deliberately not counted. A browser's first request to a
-    # basic-auth site always gets one before it resends with credentials,
-    # so counting them would report ordinary use as failed authentication.
+    counts = {"geo filter": 0, "rate limit": 0}
+    addresses: dict[str, int] = {}
+    console_lines = 0
+
     for line in tail.splitlines():
-        if "blocked_by" in line or '"status":403' in line:
-            counts["geo filter"] += 1
-        elif '"status":429' in line:
-            counts["rate limit"] += 1
+        line = line.strip()
+        if not line:
+            continue
+        if not line.startswith("{"):
+            console_lines += 1
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
 
-    return [{"reason": k, "n": v} for k, v in counts.items() if v]
+        status = entry.get("status")
+        if status == 403:
+            counts["geo filter"] += 1
+        elif status == 429:
+            counts["rate limit"] += 1
+        else:
+            continue
+
+        ip = ((entry.get("request") or {}).get("remote_ip") or "").strip()
+        if ip:
+            addresses[ip] = addresses.get(ip, 0) + 1
+
+    if console_lines and not any(counts.values()):
+        return {"readable": False,
+                "note": ("the access log is in console format, which drops "
+                         "the fields this needs. Set `format json` on the "
+                         "log directive."),
+                "counts": [], "countries": []}
+
+    # Resolved per unique address rather than per line: a scanner makes
+    # many requests from one place, and the lookup is the expensive part.
+    # Named rather than coded. A reader should not have to know that CN is
+    # China, and the database carries the name already.
+    countries: dict[str, int] = {}
+    for ip, n in addresses.items():
+        origin = resolve_origin(ip)
+        name = origin.country_name or origin.country or "unknown"
+        countries[name] = countries.get(name, 0) + n
+
+    return {
+        "readable": True,
+        "note": None,
+        "counts": [{"reason": k, "n": v} for k, v in counts.items() if v],
+        "countries": [{"country": k, "n": v} for k, v in
+                      sorted(countries.items(), key=lambda x: -x[1])[:8]],
+    }
 
 
 @app.get("/status", include_in_schema=False)

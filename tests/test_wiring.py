@@ -439,3 +439,231 @@ class TestEveryEndpointAnswers:
             assert "Error" not in reason and "error" not in reason, (
                 f"the safety record failed rather than being unavailable: "
                 f"{reason}")
+
+
+class TestOriginResolution:
+    """Country answers nothing when every other country is blocked at the
+    edge. Region and network are the questions the panel is actually
+    asking, and the address itself is still never stored."""
+
+    def test_an_unknown_address_resolves_to_nothing(self):
+        from app.runs import UNKNOWN_ORIGIN, resolve_origin
+        assert resolve_origin(None) == UNKNOWN_ORIGIN
+        assert resolve_origin("") == UNKNOWN_ORIGIN
+        assert resolve_origin("not-an-ip") == UNKNOWN_ORIGIN
+
+    def test_the_first_forwarded_hop_is_used(self):
+        """X-Forwarded-For accumulates; the client is the first entry."""
+        from app.runs import resolve_origin
+        assert resolve_origin("203.0.113.9, 10.0.0.1") == \
+            resolve_origin("203.0.113.9")
+
+    def test_nothing_returned_resembles_an_address(self):
+        from app.runs import resolve_origin
+        for value in resolve_origin("203.0.113.9"):
+            if value is None:
+                continue
+            assert not re.match(r"^\d+\.\d+\.\d+\.\d+$", str(value))
+
+    def test_the_record_carries_region_and_network(self):
+        from app.runs import RunRecord
+        fields = set(RunRecord.__dataclass_fields__)
+        assert {"region", "asn_number", "asn_name"} <= fields
+
+    def test_the_record_still_has_no_address_column(self):
+        """The rule the threat model settled on, unchanged by this."""
+        from app.runs import RunRecord
+        fields = set(RunRecord.__dataclass_fields__)
+        for forbidden in ("ip", "client_ip", "remote_addr", "address",
+                          "city", "latitude", "longitude", "postal"):
+            assert forbidden not in fields
+
+    def test_no_city_is_ever_resolved(self):
+        """Region, not city: on the free database a city is often the
+        registrant's address, and city plus a timestamp identifies a person
+        on a site this quiet."""
+        import inspect
+
+        from app import runs
+        source = inspect.getsource(runs.resolve_origin)
+        assert '"city"' not in source
+        assert "subdivisions" in source
+
+    def test_the_summary_reports_regions_and_networks(self):
+        import sqlite3
+
+        from app.runs import init_runs, summary
+        conn = sqlite3.connect(":memory:")
+        init_runs(conn)
+        data = summary(conn)
+        assert "regions" in data
+        assert "networks" in data
+        assert "countries" not in data
+
+
+class TestBlockedReportClassification:
+    """Blocked requests never reach the application, so the only thing
+    known about them is what Caddy logged. The user agent is the most
+    honest signal of intent, and a scanner usually says so."""
+
+    @pytest.mark.parametrize("agent,expected", [
+        ("Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org)",
+         "security scanner"),
+        ("masscan/1.3 (https://github.com/robertdavidgraham/masscan)",
+         "security scanner"),
+        ("Mozilla/5.0 (compatible; CensysInspect/1.1; +https://censys.io/)",
+         "security scanner"),
+        ("python-requests/2.31.0", "library default"),
+        ("curl/8.5.0", "library default"),
+        ("Go-http-client/1.1", "library default"),
+        ("Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)",
+         "AI crawler"),
+        ("Mozilla/5.0 (compatible; Googlebot/2.1)", "search crawler"),
+        ("Mozilla/5.0 (Windows NT 10.0) Chrome/126.0 Safari/537.36",
+         "browser"),
+        ("", "no user agent"),
+        ("   ", "no user agent"),
+        ("SomethingUnrecognised/1.0", "other"),
+    ])
+    def test_agents_are_classified(self, agent, expected):
+        import importlib.util
+        from pathlib import Path
+
+        path = (Path(__file__).resolve().parents[1] / "scripts"
+                / "blocked_report.py")
+        if not path.exists():
+            pytest.skip("blocked_report.py not installed")
+        spec = importlib.util.spec_from_file_location("blocked_report", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert module.classify(agent) == expected
+
+    def test_a_scanner_pretending_to_be_a_browser_is_still_caught(self):
+        """Every scanner in the wild prefixes Mozilla/5.0. Matching the
+        browser pattern first would classify all of them as people."""
+        import importlib.util
+        from pathlib import Path
+
+        path = (Path(__file__).resolve().parents[1] / "scripts"
+                / "blocked_report.py")
+        if not path.exists():
+            pytest.skip("blocked_report.py not installed")
+        spec = importlib.util.spec_from_file_location("blocked_report", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert module.classify(
+            "Mozilla/5.0 (compatible; Nmap Scripting Engine)") \
+            == "security scanner"
+
+
+class TestEdgeCountsReportWhyTheyAreEmpty:
+    """A permission failure reading the Caddy log used to return an empty
+    result, which the page rendered as "not wired up yet". That is the same
+    mistake as reading missing weather data as calm air, in a different
+    place: a failure indistinguishable from an absence."""
+
+    def _blocks(self, monkeypatch, path):
+        monkeypatch.setenv("TURBULENCE_CADDY_LOG", path)
+        from app.web.api import _edge_blocks
+        return _edge_blocks()
+
+    def test_a_missing_log_says_so(self, monkeypatch):
+        result = self._blocks(monkeypatch, "/nonexistent/access.log")
+        assert result["readable"] is False
+        assert "no access log" in result["note"]
+
+    def test_a_console_format_log_says_so(self, monkeypatch, tmp_path):
+        """The format Caddy ships with drops the fields this needs."""
+        log = tmp_path / "access.log"
+        log.write_text("2026/08/22 22:50:01 INFO handled request\n" * 20)
+        result = self._blocks(monkeypatch, str(log))
+        assert result["readable"] is False
+        assert "console format" in result["note"]
+
+    def test_a_json_log_is_counted(self, monkeypatch, tmp_path):
+        import json
+
+        log = tmp_path / "access.log"
+        log.write_text("\n".join(
+            json.dumps({"status": 403,
+                        "request": {"remote_ip": "45.155.205.7"}})
+            for _ in range(7)) + "\n")
+        result = self._blocks(monkeypatch, str(log))
+        assert result["readable"] is True
+        assert result["note"] is None
+        assert {"reason": "geo filter", "n": 7} in result["counts"]
+
+    def test_rate_limited_requests_are_counted_separately(
+            self, monkeypatch, tmp_path):
+        import json
+
+        log = tmp_path / "access.log"
+        log.write_text("\n".join([
+            json.dumps({"status": 403, "request": {"remote_ip": "1.2.3.4"}}),
+            json.dumps({"status": 429, "request": {"remote_ip": "1.2.3.4"}}),
+            json.dumps({"status": 200, "request": {"remote_ip": "1.2.3.4"}}),
+        ]) + "\n")
+        result = self._blocks(monkeypatch, str(log))
+        reasons = {r["reason"]: r["n"] for r in result["counts"]}
+        assert reasons == {"geo filter": 1, "rate limit": 1}
+
+    def test_a_successful_request_is_never_counted_as_blocked(
+            self, monkeypatch, tmp_path):
+        import json
+
+        log = tmp_path / "access.log"
+        log.write_text("\n".join(
+            json.dumps({"status": 200, "request": {"remote_ip": "1.2.3.4"}})
+            for _ in range(5)) + "\n")
+        result = self._blocks(monkeypatch, str(log))
+        assert result["counts"] == []
+
+    def test_the_status_endpoint_carries_the_note(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from app.web.api import app
+        monkeypatch.setenv("TURBULENCE_CADDY_LOG", "/nonexistent/x.log")
+        body = TestClient(app).get("/api/status")
+        if body.status_code != 200:
+            pytest.skip("status endpoint unavailable in this environment")
+        data = body.json()
+        assert "blocked_note" in data
+        assert "blocked_countries" in data
+
+
+class TestCountryNamesRatherThanCodes:
+    """The databases carry the country's name beside its code, so nothing
+    needs a hand-maintained table of 250 entries that would drift. The code
+    is stored - stable and compact - and the name is displayed."""
+
+    def test_the_origin_carries_both(self):
+        from app.runs import Origin
+        assert "country" in Origin._fields
+        assert "country_name" in Origin._fields
+
+    def test_an_unresolvable_address_gives_neither(self):
+        from app.runs import resolve_origin
+        origin = resolve_origin("not-an-ip")
+        assert origin.country is None
+        assert origin.country_name is None
+
+    def test_the_name_falls_back_to_the_code(self):
+        """A Country-only database has no names, so the code is better than
+        nothing and better than an empty cell."""
+        from app.runs import Origin
+        origin = Origin("NL", "NL", None, None, None)
+        assert (origin.country_name or origin.country) == "NL"
+
+    def test_the_record_stores_the_code_not_the_name(self):
+        """Codes are stable; display names are not, and a column holding
+        both would be ambiguous to group by."""
+        from app.runs import RunRecord
+        assert "country" in RunRecord.__dataclass_fields__
+        assert "country_name" not in RunRecord.__dataclass_fields__
+
+    def test_the_edge_panel_asks_for_the_name(self):
+        import inspect
+
+        from app.web import api
+        source = inspect.getsource(api._edge_blocks)
+        assert "country_name" in source

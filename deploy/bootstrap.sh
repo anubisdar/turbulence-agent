@@ -80,6 +80,21 @@ if ! command -v caddy >/dev/null; then
     > /etc/apt/sources.list.d/caddy-stable.list
   apt-get update -qq && apt-get install -y -qq caddy
 fi
+
+# Rate limiting is a plugin, not a core directive, and a Caddy without it
+# refuses to start rather than ignoring the config. That is the right
+# failure mode and a poor surprise, so the module goes in before any
+# Caddyfile references it.
+if ! caddy list-modules 2>/dev/null | grep -q "http.handlers.rate_limit"; then
+  say "adding the rate limit module to Caddy"
+  caddy add-package github.com/mholt/caddy-ratelimit || {
+    warn "could not add the rate limit module. Caddy will not start with a"
+    warn "Caddyfile that uses it. Either add it by hand:"
+    warn "    caddy add-package github.com/mholt/caddy-ratelimit"
+    warn "or comment out the rate_limit block, and do not remove basic auth"
+    warn "until one of those is done."
+  }
+fi
 say "packages ready"
 
 # ---------------------------------------------------------------- app user
@@ -97,18 +112,54 @@ head_ "Python environment (this is the slow part - PyTorch is ~2 GB)"
 sudo -u "$APP_USER" python3 -m venv "$APP_DIR/.venv"
 sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
 sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install -q \
-  fastapi "uvicorn[standard]" pydantic \
+  fastapi "uvicorn[standard]" pydantic pydantic-settings \
   langgraph sqlite-vec sentence-transformers \
-  pyproj shapely
+  pyproj shapely \
+  anthropic maxminddb
 say "dependencies installed"
 
+# Importing every module that reaches an external source, because a missing
+# dependency here does not crash the service: the source is caught, reported
+# as unavailable, and the search continues with an honest absence. That is
+# correct behaviour and it is indistinguishable from quiet weather, so the
+# defect can sit in production for days. Checked once, at install, loudly.
+head_ "Import check"
+missing=0
+for mod in app.sources.awc app.sources.gairmet app.sources.aeroapi \
+           app.reasoning.evidence app.reasoning.explainer app.runs; do
+  if sudo -u "$APP_USER" bash -c "cd '$APP_DIR' && '$APP_DIR/.venv/bin/python' \
+       -c 'import $mod' 2>/dev/null"; then
+    say "ok       $mod"
+  else
+    reason=$(sudo -u "$APP_USER" bash -c "cd '$APP_DIR' && \
+      '$APP_DIR/.venv/bin/python' -c 'import $mod' 2>&1 | tail -1")
+    err "FAILED   $mod"
+    err "         $reason"
+    missing=$((missing + 1))
+  fi
+done
+if [[ "$missing" -gt 0 ]]; then
+  warn "$missing module(s) will not import. Any external source they reach"
+  warn "will report as unavailable, which reads exactly like quiet weather."
+fi
+
 head_ "Pre-downloading the embedding model"
+# Run from a directory the app user owns. sentence_transformers first
+# checks for a local directory matching the model name, relative to the
+# working directory - so running this from wherever bootstrap was invoked
+# makes it stat a path the app user may not be able to read, and the
+# resulting PermissionError looks like a download failure rather than a
+# working-directory problem.
 sudo -u "$APP_USER" HF_HOME="$APP_DIR/.cache/huggingface" \
-  "$APP_DIR/.venv/bin/python" -c "
+  bash -c "cd '$APP_DIR' && '$APP_DIR/.venv/bin/python' -c \"
 from sentence_transformers import SentenceTransformer
 SentenceTransformer('BAAI/bge-small-en-v1.5', device='cpu')
 print('  model cached')
-"
+\"" || {
+  warn "the model could not be pre-downloaded. This is not fatal: it will"
+  warn "be fetched on the first search instead, which adds about 30 seconds"
+  warn "to that one request. Continuing."
+}
 
 # ---------------------------------------------------------------- secrets
 
@@ -177,6 +228,19 @@ say "turbulence-agent.service installed"
 # ---------------------------------------------------------------- caddy
 
 head_ "Caddy"
+# Before the Caddyfile, not after: Caddy opens its log file at startup and
+# refuses to run if it cannot, so a directory created later is created too
+# late. The service user comes from the package rather than being assumed.
+CADDY_USER=$(awk -F= '/^User=/{print $2}' /usr/lib/systemd/system/caddy.service 2>/dev/null)
+CADDY_USER=${CADDY_USER:-caddy}
+mkdir -p /var/log/caddy
+# Recursive on purpose. A failed first start leaves a root-owned, mode-600
+# access.log behind, and chowning only the directory leaves that file
+# unwritable - which reads as a directory permission problem and is not one.
+chown -R "$CADDY_USER:$CADDY_USER" /var/log/caddy
+chmod 755 /var/log/caddy
+say "log directory owned by $CADDY_USER"
+
 HASH=$(caddy hash-password --plaintext "$AUTH_PASS")
 cat > /etc/caddy/Caddyfile <<EOF
 {
@@ -208,7 +272,6 @@ $DOMAIN {
     # a single worker. Without a ceiling a stalled request holds a connection
     # and a worker together.
     reverse_proxy 127.0.0.1:8000 {
-        header_up X-Forwarded-Proto {scheme}
         transport http {
             response_header_timeout 90s
         }
@@ -221,13 +284,24 @@ $DOMAIN {
         $AUTH_USER $HASH
     }
 
+    # JSON rather than console. The console format is easier to read by eye
+    # and drops the request headers, so a blocked request records that it
+    # was blocked and nothing about who sent it. The user agent and the
+    # source address are the two things worth knowing about traffic that
+    # never reaches the application, and JSON carries both.
     log {
-        output file /var/log/caddy/access.log
-        format console
+        output file /var/log/caddy/access.log {
+            # Caddy creates the file mode 600 by default, which the
+            # application cannot read - and it reports that as a quiet edge
+            # rather than as a permission problem unless told otherwise.
+            mode 644
+            roll_size 20mb
+            roll_keep 5
+        }
+        format json
     }
 }
 EOF
-mkdir -p /var/log/caddy && chown caddy:caddy /var/log/caddy
 systemctl reload caddy 2>/dev/null || systemctl restart caddy
 say "serving $DOMAIN with basic auth"
 

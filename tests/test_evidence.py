@@ -19,7 +19,13 @@ from app.reasoning.evidence import (
     worst,
 )
 from app.reasoning.geometry import build_corridor, great_circle, intersects_ring
-from app.sources.gairmet import GairmetClient, GairmetFetchError, parse_advisory
+from app.sources.gairmet import (
+    GairmetClient,
+    GairmetFetchError,
+    TurbulenceAdvisory,
+    TurbulenceSeverity,
+    parse_advisory,
+)
 
 KPIT = (40.4914167, -80.2326944)
 KBOS = (42.3629, -71.0064)
@@ -654,3 +660,96 @@ class TestTheWorstReportsLocation:
         observed = gather_observed(shape, self._reports((8, 34000, "light")),
                                    NOW)
         assert observed.worst_at is not None
+
+
+class TestVerticalMissIsDescribedPrecisely:
+    """An advisory covering the route on the ground but not in the air is
+    the case worth naming. It is real, it is active, and the route passes
+    through its footprint - so an implementation testing the polygon alone
+    would report its severity while describing air thousands of feet from
+    the aircraft.
+
+    Observed live: two advisories reaching FL220 and FL240 under routes
+    cruising FL290 to FL390.
+    """
+
+    PATH = great_circle((45.59, -122.60), (39.86, -104.67), 24)
+
+    def _ring(self, pad=3.0):
+        lats = [p[0] for p in self.PATH]
+        lons = [p[1] for p in self.PATH]
+        return [(min(lats) - pad, min(lons) - pad),
+                (max(lats) + pad, min(lons) - pad),
+                (max(lats) + pad, max(lons) + pad),
+                (min(lats) - pad, max(lons) + pad),
+                (min(lats) - pad, min(lons) - pad)]
+
+    def _advisory(self, base, top, ring=None):
+        return TurbulenceAdvisory(
+            hazard="TURB-HI", severity=TurbulenceSeverity.MODERATE,
+            base_ft=base, top_ft=top, ring=ring or self._ring(),
+            valid_time=NOW, expire_time=NOW + timedelta(hours=3),
+            issue_time=NOW, forecast_hour=3, tag="1W", status="active",
+            source="test")
+
+    @pytest.fixture
+    def cruise(self):
+        return build_corridor(self.PATH, altitude_min_ft=29000,
+                              altitude_max_ft=39000)
+
+    def test_the_advisory_top_is_stated(self, cruise):
+        _, _, notes, *_ = gather_forecast(
+            cruise, [self._advisory(0, 22000), self._advisory(16000, 24000)])
+        assert "FL240" in notes[0]
+
+    def test_the_corridor_band_is_stated(self, cruise):
+        _, _, notes, *_ = gather_forecast(cruise, [self._advisory(0, 24000)])
+        assert "FL290" in notes[0] and "FL390" in notes[0]
+
+    def test_the_size_of_the_gap_is_stated(self, cruise):
+        """A five hundred foot miss and a seven thousand foot miss read
+        identically without it."""
+        _, _, notes, *_ = gather_forecast(cruise, [self._advisory(0, 24000)])
+        assert "5,000 feet" in notes[0]
+
+    def test_it_says_ground_and_air_rather_than_just_altitudes(self, cruise):
+        _, _, notes, *_ = gather_forecast(cruise, [self._advisory(0, 24000)])
+        assert "on the ground but not in the air" in notes[0]
+
+    def test_an_advisory_above_the_corridor_is_described_as_such(self):
+        low = build_corridor(self.PATH, altitude_min_ft=20000,
+                             altitude_max_ft=24000)
+        _, _, notes, *_ = gather_forecast(low, [self._advisory(31000, 41000)])
+        assert "sits above it" in notes[0]
+        assert "FL310" in notes[0]
+
+    def test_the_grammar_agrees_in_the_singular(self, cruise):
+        _, _, notes, *_ = gather_forecast(cruise, [self._advisory(0, 24000)])
+        assert "1 turbulence forecast covers" in notes[0]
+
+    def test_the_grammar_agrees_in_the_plural(self, cruise):
+        _, _, notes, *_ = gather_forecast(
+            cruise, [self._advisory(0, 22000), self._advisory(16000, 24000)])
+        assert "2 turbulence forecasts cover" in notes[0]
+
+    def test_a_distant_advisory_is_not_blamed_on_altitude(self, cruise):
+        """The previous wording said "none cover this corridor at its
+        altitudes" even when the advisory was two thousand miles away,
+        which blamed altitude for what was geography."""
+        florida = [(25.0, -81.0), (28.0, -81.0), (28.0, -78.0),
+                   (25.0, -78.0), (25.0, -81.0)]
+        _, _, notes, *_ = gather_forecast(
+            cruise, [self._advisory(0, 45000, ring=florida)])
+        assert "on the ground" not in notes[0]
+        assert "none of them covers this route" in notes[0]
+
+    def test_an_advisory_that_applies_is_unaffected(self, cruise):
+        reading, count, notes, *_ = gather_forecast(
+            cruise, [self._advisory(26000, 40000)])
+        assert reading is Severity.MODERATE
+        assert count == 1
+        assert "overlap this corridor" in notes[0]
+
+    def test_absence_is_still_never_smooth(self, cruise):
+        _, _, notes, *_ = gather_forecast(cruise, [self._advisory(0, 24000)])
+        assert "not a forecast of smooth air" in notes[0]

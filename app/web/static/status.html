@@ -58,6 +58,11 @@ main{padding:22px; max-width:1180px; margin:0 auto}
 .chart.tall{height:210px}
 .chart.short{height:110px}
 .rows{font-size:13px}
+/* A list of short labels reads better in columns than stretched across
+   the page, and the panel stays a sensible height as the list grows. */
+.cols .rows{column-count:3; column-gap:34px}
+@media (max-width:760px){ .cols .rows{column-count:2} }
+.cols .row{break-inside:avoid}
 .row{display:flex; justify-content:space-between; gap:12px; padding:6px 0; border-bottom:1px solid var(--rule)}
 .row:last-child{border-bottom:0}
 .row span{color:var(--mid); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
@@ -149,7 +154,7 @@ function render(d){
   $('window').textContent = `last ${d.window_days} days`;
   $('stamp').textContent = new Date().toISOString().slice(11, 16) + ' UTC';
   $('foot').textContent =
-    `${n(searches)} searches recorded. Country is resolved at write time and the address discarded.`;
+    `${n(searches)} searches recorded. Region and network are resolved at write time; the address is discarded.`;
 
   if (!searches){
     $('main').innerHTML =
@@ -244,18 +249,52 @@ function render(d){
     <div class="grid g2">
       <div class="panel">
         <h2>Where requests come from</h2>
-        <p class="note">country only, resolved at write time</p>
-        ${rows(d.countries, r => r.country, r => r.n,
-               'No country data yet. Searches recorded before this build did '
+        <p class="note">region and network, resolved at write time. The
+          address itself is never stored.</p>
+        ${rows(d.regions, r => r.region, r => r.n,
+               'No region data yet. Searches recorded before this build did '
                + 'not carry one.')}
+        <div class="aside">State rather than city: on the free database a
+          city is often the registrant&rsquo;s address rather than the
+          user&rsquo;s, and city plus a timestamp on a site this quiet
+          identifies a person.</div>
       </div>
       <div class="panel">
-        <h2>Blocked at the edge</h2>
-        <p class="note">stopped by the GeoIP filter, which blocks every region
-          outside the US, so they never reached the application</p>
-        ${rows(d.blocked, r => r.reason, r => r.n,
-               'Edge counts come from the Caddy log and are not wired up yet.')}
+        <h2>Which networks</h2>
+        <p class="note">whose network the request arrived from</p>
+        ${rows(d.networks,
+               r => r.asn ? `${r.network} \u00b7 ${r.asn}` : r.network,
+               r => r.n,
+               'No network data yet. Needs GeoLite2-ASN.mmdb on the host.')}
+        <div class="aside">The question country cannot answer when every
+          other country is blocked. A request from Amazon or DigitalOcean is
+          automation; one from a domestic carrier is a person.</div>
       </div>
+    </div>
+
+    <div class="panel">
+      <h2>Blocked at the edge</h2>
+      <p class="note">stopped by the GeoIP filter or the rate limit, so they
+        never reached the application</p>
+      ${d.blocked_note
+        ? `<div class="empty">${esc(d.blocked_note)}</div>`
+        : `
+          <div class="big">
+            <b>${n((d.blocked || []).reduce((t, r) => t + r.n, 0))}</b>
+            <span>${(d.blocked || []).length > 1
+              ? (d.blocked || []).map(r =>
+                  `${r.n} ${esc(r.reason)}`).join(' &middot; ')
+              : ((d.blocked || [])[0]
+                  ? `blocked by the ${esc(d.blocked[0].reason)}`
+                  : 'blocked')}</span>
+          </div>
+          <div class="cols">
+            ${rows(d.blocked_countries, r => r.country, r => r.n,
+                   'No blocked requests in the recent log.')}
+          </div>
+          <div class="aside">Which countries these were is the one thing the
+            panel above cannot show: it reports only what got through, and
+            everything that got through is US by definition.</div>`}
     </div>`;
 
   // The numbers and tables are the substance; the charts illustrate them.

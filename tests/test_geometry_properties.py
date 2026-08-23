@@ -384,16 +384,28 @@ class TestOverlapInvariants:
         """The general case, with a tolerance that reflects the method.
 
         Each corridor is projected into the other's local projection, and
-        those differ, so a short corridor compared against a long one gives
-        a slightly different answer depending on which is the reference.
-        Measured worst case at a 25x length mismatch is 0.028; a search
-        never produces that, but a caller might.
+        those differ, so the answer varies slightly with which is the
+        reference. Two things drive the error, and the second is the larger:
+
+          scale mismatch   0.028 worst at a 25x length difference
+          latitude span    0.050 on a 3,990 nm corridor spanning 66 degrees
+                           of latitude and reaching 77 degrees north
+
+        The second is the harder case because an azimuthal projection is
+        anchored on a single point, so a corridor whose ends are 66 degrees
+        of latitude apart has ends far from its own anchor. Across 400
+        random pairs per latitude band the typical worst is 0.011; the
+        figure above is an outlier Hypothesis found and this measurement
+        did not.
+
+        No search produces either shape - all four corridors run between
+        the same two airports - but a caller could.
         """
         a = build_corridor(great_circle(*first, 16))
         b = build_corridor(great_circle(*second, 16))
         assume(a.area_nm2() > 0 and b.area_nm2() > 0)
         assert overlap_fraction(a, b) == pytest.approx(
-            overlap_fraction(b, a), abs=0.05)
+            overlap_fraction(b, a), abs=0.08)
 
     def test_asymmetry_grows_with_the_scale_mismatch(self):
         """Documents where the approximation loses precision, so a future
