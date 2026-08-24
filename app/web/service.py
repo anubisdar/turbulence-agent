@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from datetime import datetime, timedelta, timezone
 import time
 from dataclasses import dataclass
 from itertools import combinations
@@ -407,6 +408,60 @@ def _overlaps(shapes: dict[str, CorridorShape]) -> list[dict]:
     return out
 
 
+#: How far ahead a G-AIRMET reaches. Beyond this no forecast describes the
+#: departure, whatever the date field says.
+FORECAST_HORIZON_HOURS = 6
+
+
+def _target_time(date: str | None, time_of_day: str | None
+                 ) -> tuple[datetime | None, str | None]:
+    """When the flight departs, and a note if that is out of forecast reach.
+
+    The forecast layer already accepts a time and already filters advisories
+    to those valid at it. Nothing was supplying one, so every search asked
+    what the air is like *now* and presented the answer as though it were
+    about the requested departure.
+
+    Two cases, and the second is the one that matters. Inside the forecast
+    horizon the target time is used and the answer is about the departure.
+    Beyond it, no forecast reaches that far and the agent falls back to the
+    present - which is defensible only if it says so, because otherwise it
+    is describing one thing while appearing to describe another.
+    """
+    if not date and not time_of_day:
+        return None, None
+
+    now = datetime.now(timezone.utc)
+    try:
+        if date and time_of_day:
+            target = datetime.strptime(f"{date} {time_of_day}",
+                                       "%Y-%m-%d %H:%M")
+        elif date:
+            target = datetime.strptime(date, "%Y-%m-%d")
+        else:
+            hour, _, minute = time_of_day.partition(":")
+            target = now.replace(hour=int(hour), minute=int(minute),
+                                 second=0, microsecond=0)
+            # A time of day already past today means the next occurrence.
+            if target < now:
+                target += timedelta(days=1)
+        target = target.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None, None
+
+    ahead = (target - now).total_seconds() / 3600.0
+    if ahead < 0:
+        return None, (
+            "The requested departure is in the past, so the turbulence "
+            "reading describes conditions now rather than then.")
+    if ahead > FORECAST_HORIZON_HOURS:
+        return None, (
+            f"This departure is about {ahead:.0f} hours away and turbulence "
+            f"forecasts reach roughly {FORECAST_HORIZON_HOURS}. The reading "
+            f"below describes the air on this route now, not at departure.")
+    return target, None
+
+
 def run_corridor_search(req: SearchRequest, api_key: str | None,
                         db_path: str = DEFAULT_DB) -> dict[str, Any]:
     """Run the search and shape it for a map. No search logic lives here.
@@ -461,10 +516,19 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
         if gairmet_client is not None:
             gairmet_client.timings = timings
 
+        forecast_when, horizon_note = _target_time(
+            req.departure_date, req.departure_time)
+        if horizon_note:
+            # Alongside the other source notes, so it appears in the same
+            # place a reader already looks for what the agent could not
+            # establish.
+            wx_notes.append(horizon_note)
+
         generator = CorridorGenerator(
             client=client, conn=conn,
             origin=req.origin.upper(), dest=req.dest.upper(),
             width_nm=req.width_nm, target_time=req.departure_time,
+            when=forecast_when,
             fetch_pireps=fetch_pireps, gairmet_client=gairmet_client,
         )
         runner = search_graph if req.use_graph else search

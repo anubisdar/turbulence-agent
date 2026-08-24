@@ -66,6 +66,71 @@ SOFTENING = (
 )
 
 #: Severity words the model must not use unless the evidence holds them.
+#: Cues that a sentence is denying rather than asserting. Borrowed from the
+#: negation-detection approach used on clinical text, which has the same
+#: problem: a word appearing in a note does not mean the finding is present.
+_NEGATION_CUES = (
+    "no basis", "no evidence", "no reports", "no forecast", "not",
+    "never", "cannot", "can't", "without", "neither", "nor", "absence",
+    "lack of", "nothing", "unresolved", "does not", "do not", "is not",
+)
+
+#: Verbs that turn a mention back into a claim about the air.
+_ASSERTION_VERBS = re.compile(
+    r"\b(?:is|are|was|were|be|being|says?|said|calls?|expect(?:ed|s)?|"
+    r"reports?|reported|indicates?|shows?|remains?|becomes?|looks?|"
+    r"feels?|likely)\b")
+
+#: How many words after the verb still count as attached to it, so that
+#: "are entirely smooth" reads as an assertion rather than three unrelated
+#: words. Without this the adverb hides the verb and a claim escapes.
+_ASSERTION_WINDOW = 4
+
+
+def _negated(text: str, word: str) -> bool:
+    """Whether every mention of a severity word sits inside a denial.
+
+    A severity named while denying it applies is not a claim about the air.
+    Observed in production on an unresolved route: the model wrote "there
+    is no basis in the available data to characterize conditions as light,
+    moderate, or severe" and was rejected three times for saying so. That
+    paragraph was this project's own argument in the model's words, and it
+    was discarded.
+
+    Narrowed three ways, because the cost of over-exempting is the exact
+    harm the validator exists to prevent:
+
+      the negation must appear earlier in the *same sentence*, so a denial
+      in one sentence cannot license a claim in the next;
+
+      an assertion verb between the negation and the severity word cancels
+      the exemption, unless that span is itself negated - so "conditions
+      are entirely smooth" fails while "the air is not light" does not;
+
+      *every* occurrence must be negated. One plain assertion anywhere
+      fails the whole check, so a claim cannot be buried among denials.
+    """
+    pattern = re.compile(rf"\b{word}\b")
+    found = False
+
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        for match in pattern.finditer(sentence):
+            found = True
+            before = sentence[:match.start()]
+
+            if not any(cue in before for cue in _NEGATION_CUES):
+                return False
+
+            # The words immediately preceding decide whether the denial
+            # still governs this mention or something re-asserted since.
+            tail = " ".join(before.split()[-_ASSERTION_WINDOW:])
+            if (_ASSERTION_VERBS.search(tail)
+                    and not any(cue in tail for cue in _NEGATION_CUES)):
+                return False
+
+    return found
+
+
 SEVERITY_WORDS = {
     "smooth": Severity.SMOOTH,
     "light": Severity.LIGHT,
@@ -245,6 +310,21 @@ def validate(text: str, facts: dict[str, Any]) -> Verdict:
             # compares and still fails.
             if re.search(rf"\b(?:more|less|most)\s+{word}\s+(?:of|than)\b",
                          low):
+                continue
+
+            # A severity named inside a negation is not a claim about the
+            # air. Observed in production on an unresolved route, where the
+            # model wrote "there is no basis in the available data to
+            # characterize conditions as light, moderate, or severe" and was
+            # rejected three times for saying so. That paragraph was the
+            # project's own argument in the model's words, and it was
+            # discarded.
+            #
+            # Narrowed twice over. The negation has to appear earlier in the
+            # same sentence, and an assertion verb immediately before the
+            # severity word cancels the exemption - so "does not say light,
+            # it says severe" still fails on "severe".
+            if _negated(low, word):
                 continue
             reasons.append(f"names a severity the evidence does not hold: "
                            f"{word!r}")

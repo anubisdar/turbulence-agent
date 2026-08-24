@@ -333,3 +333,90 @@ class TestComparativesAreNotClaims:
                 "is not smooth, and this absence is not a finding of calm "
                 "air along the way.")
         assert not [r for r in self._reasons(text, facts) if "smooth" in r]
+
+
+class TestNegatedSeveritiesAreNotClaims:
+    """The second false positive class, found by reading a rejection log.
+
+    On an unresolved KSAN\u2013KSFO route the model wrote "there is no basis
+    in the available data to characterize conditions as light, moderate, or
+    severe, because the reports and forecasts needed to make that call
+    simply do not exist for this flight". It was rejected three times, once
+    per word, for naming severities the evidence did not hold.
+
+    It was explaining that no severity applies. The paragraph ended "what
+    you're left with is an absence of information, not an assurance of
+    anything" \u2014 this project's own argument in the model's words, and it
+    was discarded.
+    """
+
+    FACTS = {
+        "route": "KSAN to KSFO", "reading": "unresolved",
+        "pilot_reports": {"reading": "unresolved", "count": 0},
+        "forecast": {"reading": "unresolved", "count": 0},
+        "sources_disagree": False, "corridors_considered": 6,
+        "corridors_kept": 4,
+    }
+
+    REAL = (
+        "For the KSAN to KSFO route at FL380 to FL400, the assessment came "
+        "back unresolved: there are no pilot reports for this corridor and "
+        "no forecast data covering it. This means nothing is known one way "
+        "or the other about the air along this route, which is not the same "
+        "as saying the air is calm. There is no basis in the available data "
+        "to characterize conditions as light, moderate, or severe, because "
+        "the reports and forecasts needed to make that call simply do not "
+        "exist for this flight. What you're left with is an absence of "
+        "information, not an assurance of anything.")
+
+    def test_the_real_paragraph_is_accepted(self):
+        result = validate(self.REAL, self.FACTS)
+        assert result.ok, result.reasons
+
+    @pytest.mark.parametrize("text,word", [
+        ("The conditions cannot be described as moderate or worse, and "
+         "nothing is known about this route at all.", "moderate"),
+        ("Neither light nor moderate conditions were reported anywhere "
+         "along this corridor during the lookback window.", "light"),
+        ("The air is not light along this route, and no forecast covers "
+         "it at the altitudes the flight uses.", "light"),
+    ])
+    def test_other_denials_are_accepted(self, text, word):
+        from app.reasoning.explainer import _negated
+        assert _negated(text.lower(), word) is True
+
+    def test_a_claim_after_a_negation_cue_still_fails(self):
+        """The loophole this nearly opened. "Nothing is known" is a
+        negation, but "conditions are entirely smooth" in the same sentence
+        is a claim, and the adverb must not hide the verb."""
+        text = ("Nothing is known about this route, and conditions along it "
+                "are entirely smooth for the whole of the flight.")
+        result = validate(text, self.FACTS)
+        assert not result.ok
+        assert any("smooth" in r for r in result.reasons)
+
+    def test_a_reassertion_after_a_denial_still_fails(self):
+        from app.reasoning.explainer import _negated
+        assert _negated("the forecast does not say light, it says severe.",
+                        "severe") is False
+
+    def test_a_claim_buried_among_denials_still_fails(self):
+        """Every occurrence must be negated. One plain assertion anywhere
+        fails the whole check."""
+        from app.reasoning.explainer import _negated
+        assert _negated("no pilot reported light air. conditions will be "
+                        "severe.", "severe") is False
+
+    def test_a_plain_invented_severity_still_fails(self):
+        text = ("Severe turbulence is expected at cruise along this route "
+                "today, so the ride will be rough throughout the flight.")
+        result = validate(text, self.FACTS)
+        assert not result.ok
+
+    def test_reassurance_is_unaffected(self):
+        """The negation exemption must not reach the other three rules."""
+        text = ("No forecast covers this route and no pilot has reported "
+                "along it, so you should be fine on this flight today.")
+        result = validate(text, self.FACTS)
+        assert not result.ok
+        assert any("reassurance" in r for r in result.reasons)

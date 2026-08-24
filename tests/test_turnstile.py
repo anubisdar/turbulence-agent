@@ -262,18 +262,54 @@ class TestChallengeTelemetry:
         counts = {r["outcome"]: r["n"] for r in summary(conn)["challenges"]}
         assert counts == {"session": 2, "solved": 1}
 
-    def test_refusals_are_counted_separately_from_the_database(self):
-        """A refused request never becomes a row, so it cannot be counted
-        from search_runs. The journal is the only record."""
-        from app.web.api import _challenge_refusals
-        result = _challenge_refusals()
-        assert "no_token" in result and "rejected" in result
+    def test_refusals_are_recorded_outside_the_search_record(self):
+        """A refused request never becomes a search, so it cannot be
+        counted from search_runs. A timer ingests them into their own
+        table, which carries the same window as everything else."""
+        import sqlite3
 
-    def test_refusals_report_disabled_rather_than_zero(self, monkeypatch):
-        """Zero refusals and a disabled challenge are different facts."""
-        monkeypatch.delenv("TURNSTILE_SECRET_KEY", raising=False)
-        from app.web.api import _challenge_refusals
-        assert _challenge_refusals()["enabled"] is False
+        from app.edge_events import (
+            CHALLENGE_REFUSAL,
+            dedup_key,
+            init_edge_events,
+            record_events,
+            summary,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        init_edge_events(conn)
+        record_events(conn, [{
+            "occurred_at": "2026-08-24T00:00:00+00:00",
+            "kind": CHALLENGE_REFUSAL, "detail": "presented no token",
+            "dedup_key": dedup_key(CHALLENGE_REFUSAL, "a")}])
+        assert summary(conn)["refusals"] == [
+            {"label": "presented no token", "n": 1}]
+
+    def test_the_two_refusal_kinds_stay_distinct(self):
+        """One saw the page and failed; the other never saw it, which is
+        what an automated client looks like. Merging them would hide the
+        signal worth having."""
+        import sqlite3
+
+        from app.edge_events import (
+            CHALLENGE_REFUSAL,
+            dedup_key,
+            init_edge_events,
+            record_events,
+            summary,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        init_edge_events(conn)
+        record_events(conn, [
+            {"occurred_at": "2026-08-24T00:00:00+00:00",
+             "kind": CHALLENGE_REFUSAL, "detail": "presented no token",
+             "dedup_key": dedup_key(CHALLENGE_REFUSAL, "a")},
+            {"occurred_at": "2026-08-24T00:01:00+00:00",
+             "kind": CHALLENGE_REFUSAL,
+             "detail": "presented one that failed",
+             "dedup_key": dedup_key(CHALLENGE_REFUSAL, "b")}])
+        assert len(summary(conn)["refusals"]) == 2
 
 
 class TestLocalRequestsAreExempt:

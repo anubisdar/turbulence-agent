@@ -118,6 +118,51 @@ sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install -q \
   anthropic maxminddb
 say "dependencies installed"
 
+# ---- edge event ingest -----------------------------------------------
+#
+# Firewall detections, challenge refusals and edge blocks happen in Caddy or
+# before a search starts, so the application never sees them. They were
+# reconstructed from logs while rendering the status page, which meant three
+# panels each carrying a different window from the rest of the site. This
+# moves them into the same database on the same retention.
+head_ "Edge event ingest"
+cat > /etc/systemd/system/ingest-edge-events.service <<UNIT
+[Unit]
+Description=Ingest edge events into the turbulence agent database
+After=network.target
+
+[Service]
+Type=oneshot
+User=$APP_USER
+WorkingDirectory=$APP_DIR
+EnvironmentFile=$ENV_FILE
+ExecStart=$APP_DIR/.venv/bin/python $APP_DIR/scripts/ingest_edge_events.py
+UNIT
+
+cat > /etc/systemd/system/ingest-edge-events.timer <<UNIT
+[Unit]
+Description=Ingest edge events every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+# The ingest re-reads thirty minutes each run and deduplicates, so a missed
+# window costs nothing and a persistent one is caught up automatically.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now ingest-edge-events.timer
+say "ingest timer enabled (every 5 minutes)"
+
+# The ingest reads the journal, which needs group membership the app user
+# does not have by default.
+usermod -a -G systemd-journal "$APP_USER" || warn "could not add $APP_USER to systemd-journal"
+
+
 # Importing every module that reaches an external source, because a missing
 # dependency here does not crash the service: the source is caught, reported
 # as unavailable, and the search continues with an honest absence. That is

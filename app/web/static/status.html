@@ -267,13 +267,11 @@ function render(d){
                  r => r.n, '')
           : `<div class="empty">The challenge is not enabled, so every
              search went straight through.</div>`}
-        ${(d.challenge_refusals || {}).enabled && d.challenge_refusals.readable
-          ? `<div class="aside">Turned away in the last
-             ${d.challenge_refusals.hours} hours:
-             <b>${n(d.challenge_refusals.no_token)}</b> presented no token,
-             <b>${n(d.challenge_refusals.rejected)}</b> presented one that
-             failed. A refused request never becomes a search, so these are
-             counted from the journal rather than the database.</div>`
+        ${(d.challenge_refusals || []).length
+          ? `<div class="aside">Turned away: ${(d.challenge_refusals || [])
+               .map(r => `<b>${n(r.n)}</b> ${esc(r.label)}`).join(', ')}. A
+             refused request never becomes a search, so these are recorded
+             separately and carry the same window as everything else.</div>`
           : ''}
       </div>
 
@@ -304,22 +302,19 @@ function render(d){
 
     <div class="panel" style="margin-bottom:16px">
       <h2>Web application firewall</h2>
-      <p class="note">${(d.waf || {}).enabled
-        ? `detection only &middot; every one of these was allowed through to
-           the application`
-        : 'not reporting'}</p>
-      ${!(d.waf || {}).enabled
-        ? `<div class="empty">${esc((d.waf || {}).note
-             || 'The firewall is not reporting.')}</div>`
-        : !d.waf.detections
-        ? `<div class="empty">Nothing detected in the last ${d.waf.hours}
-           hours.</div>`
+      <p class="note">detection only &middot; every one of these was allowed
+        through to the application</p>
+      ${d.edge_note
+        ? `<div class="empty">${esc(d.edge_note)}</div>`
+        : !(d.waf || {}).detections
+        ? `<div class="empty">Nothing detected in the last ${d.window_days}
+           days.</div>`
         : `
         <div class="big">
           <b>${n(d.waf.detections)}</b>
-          <span>detections from <b>${n(d.waf.sources)}</b>
-            source${d.waf.sources === 1 ? '' : 's'} in the last
-            ${d.waf.hours} hours &middot; worst anomaly score
+          <span>detections from <b>${n(d.waf.networks_seen)}</b>
+            network${d.waf.networks_seen === 1 ? '' : 's'} &middot; worst
+            anomaly score
             <b>${n(d.waf.worst_score)}</b></span>
         </div>
         <div class="waf-cols">
@@ -350,20 +345,20 @@ function render(d){
       <h2>Blocked at the edge</h2>
       <p class="note">stopped by the GeoIP filter or the rate limit, so they
         never reached the application</p>
-      ${d.blocked_note
-        ? `<div class="empty">${esc(d.blocked_note)}</div>`
+      ${d.edge_note
+        ? `<div class="empty">${esc(d.edge_note)}</div>`
         : `
           <div class="big">
             <b>${n((d.blocked || []).reduce((t, r) => t + r.n, 0))}</b>
             <span>${(d.blocked || []).length > 1
               ? (d.blocked || []).map(r =>
-                  `${r.n} ${esc(r.reason)}`).join(' &middot; ')
+                  `${r.n} ${esc(r.label)}`).join(' &middot; ')
               : ((d.blocked || [])[0]
-                  ? `blocked by the ${esc(d.blocked[0].reason)}`
+                  ? `blocked by the ${esc(d.blocked[0].label)}`
                   : 'blocked')}</span>
           </div>
           <div class="cols">
-            ${rows(d.blocked_countries, r => r.country, r => r.n,
+            ${rows(d.blocked_countries, r => r.label, r => r.n,
                    'No blocked requests in the recent log.')}
           </div>
           <div class="aside">Which countries these were is the one thing the

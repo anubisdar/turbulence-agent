@@ -21,12 +21,8 @@ empty airport pair. Same code path, same stack, just not fetched live.
 from __future__ import annotations
 
 import ipaddress
-import json
 import os
-import time
-import re
-import subprocess
-from urllib.parse import unquote
+import sqlite3
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -34,7 +30,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
 
-from app.runs import resolve_origin
+from app.edge_events import init_edge_events
+from app.edge_events import summary as edge_summary
 from app.web import turnstile
 from app.logging_setup import (
     current_request_id,
@@ -398,289 +395,55 @@ def status(days: int = 30) -> dict:
     except Exception as e:  # noqa: BLE001
         raise _fail(e)
 
-    data["challenge_refusals"] = _challenge_refusals()
-    data["waf"] = _waf_detections()
-
-    edge = _edge_blocks()
-    data["blocked"] = edge["counts"]
-    data["blocked_countries"] = edge["countries"]
-    data["blocked_note"] = edge["note"]
+    edge = _edge_summary()
+    data["waf"] = edge.get("waf")
+    data["blocked"] = edge.get("blocked")
+    data["blocked_countries"] = edge.get("blocked_countries")
+    data["challenge_refusals"] = edge.get("refusals")
+    data["edge_note"] = edge.get("note")
+    data["edge_available"] = edge.get("available", False)
     return data
 
 
-def _challenge_refusals(hours: int = 24) -> dict:
-    """Searches the challenge turned away.
+def _edge_summary() -> dict:
+    """Edge events, read from the database rather than from the logs.
 
-    These never become rows: a refused request stops before the search
-    starts. The journal is the only record, which makes this a different
-    kind of number from everything else on the page - recent rather than
-    thirty days, and approximate rather than exact.
+    Three panels used to be reconstructed at read time: firewall detections
+    and challenge refusals from the journal on a 24 hour window, edge
+    blocks from a byte-bounded tail of the access log. Everything else on
+    the page came from a database keeping 30 exact days. The effect was
+    data that appeared to vanish overnight, and counts that could not be
+    exact, because a log that rolls at 20 MB drops history without saying
+    so.
+
+    A timer now ingests those events into the same database on the same
+    retention, so the page has one window and makes no subprocess calls
+    while rendering.
     """
-    if not turnstile.enabled():
-        return {"enabled": False, "no_token": 0, "rejected": 0}
-
-    counts = {"no_token": 0, "rejected": 0}
     try:
-        result = subprocess.run(
-            ["journalctl", "-t", "turbulence-agent", "--since",
-             f"{hours} hours ago", "-o", "cat", "--no-pager"],
-            capture_output=True, text=True, timeout=8)
-    except (OSError, subprocess.SubprocessError):
-        return {"enabled": True, "readable": False, **counts}
-
-    for line in result.stdout.splitlines():
-        if "challenge outcome=" not in line:
-            continue
-        for key in counts:
-            if f"outcome={key}" in line:
-                counts[key] += 1
-    return {"enabled": True, "readable": True, "hours": hours, **counts}
-
-
-#: CRS tags an attack family on each rule. Mapped to plain words because
-#: "attack-lfi" is not what a reader wants to see.
-_ATTACK_NAMES = {
-    "attack-reputation-scanner": "scanner detection",
-    "attack-lfi": "path traversal",
-    "attack-rfi": "remote file inclusion",
-    "attack-rce": "remote command execution",
-    "attack-sqli": "SQL injection",
-    "attack-xss": "cross-site scripting",
-    "attack-injection-php": "PHP injection",
-    "attack-injection-generic": "code injection",
-    "attack-protocol": "protocol violation",
-    "attack-fixation": "session fixation",
-    "attack-disclosure": "information disclosure",
-    "attack-reputation-ip": "known bad address",
-    "attack-generic": "generic attack",
-}
-
-#: The rule that carries the request-level anomaly score. CRS refuses a
-#: request at 5 or more, so this is the number that decides whether moving
-#: to SecRuleEngine On would have blocked it.
-_ANOMALY_RULE = 949110
-_BLOCKING_THRESHOLD = 5
-
-_SCORE = re.compile(r"Total Score:\s*(\d+)")
-
-#: Coraza writes its messages in the bracketed format ModSecurity uses,
-#: inside the JSON `msg` field. These pull the pieces back out.
-_UNIQUE_ID = re.compile(r'\[unique_id \\?"([^"\\]+)')
-_URI = re.compile(r'\[uri \\?"([^"\\]*)')
-_CLIENT = re.compile(r'\[client \\?"([^"\\]+)')
-_TAG = re.compile(r'\[tag \\?"([^"\\]+)')
-
-
-def _waf_detections(hours: int = 24) -> dict:
-    """What the firewall saw, counted per request rather than per rule.
-
-    Read from journald rather than from a Coraza audit file. The audit log
-    was the obvious choice and turned out to be unusable: its JSON
-    formatter emits full request headers regardless of SecAuditLogParts,
-    Coraza does not implement SecSanitiseRequestHeader, and the result was
-    a file on disk containing the Authorization header of every
-    authenticated request. There is no configuration that removes it.
-
-    journald carries the same detections without a second copy of the
-    credentials, so it is the better source despite being the more awkward
-    one to parse.
-
-    Counted per request: one request tripping four rules is one detection.
-    The four test vectors run against this deployment produced thirteen log
-    lines between them, so a line count would be wrong by a factor of
-    three. Requests are grouped by the unique_id Coraza assigns each one.
-    """
-    empty = {"enabled": False, "detections": 0, "would_block": 0,
-             "sources": 0, "worst_score": 0, "attacks": [], "countries": [],
-             "paths": [], "note": None}
+        conn = sqlite3.connect(_db_path())
+    except sqlite3.Error:
+        return {"available": False,
+                "note": "the event store could not be opened"}
 
     try:
-        result = subprocess.run(
-            ["journalctl", "-u", "caddy", "--since", f"{hours} hours ago",
-             "-o", "cat", "--no-pager"],
-            capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError) as e:
-        return {**empty, "note": f"could not read the journal: "
-                                 f"{type(e).__name__}"}
+        init_edge_events(conn)
+        data = edge_summary(conn)
+    except sqlite3.Error as e:
+        return {"available": False,
+                "note": f"the event store could not be read "
+                        f"({type(e).__name__})"}
+    finally:
+        conn.close()
 
-    # One entry per matched rule. Grouped by unique_id so a request that
-    # trips four rules counts once.
-    requests: dict[str, dict] = {}
-
-    for line in result.stdout.splitlines():
-        # Parse first, match on the field. Caddy writes compact JSON with
-        # no space after the colon, but matching the raw text would break
-        # against any writer that formats differently - including the test
-        # fixtures, which is how this was found.
-        if "http.handlers.waf" not in line:
-            continue
-        try:
-            entry_json = json.loads(line) or {}
-        except ValueError:
-            continue
-        if entry_json.get("logger") != "http.handlers.waf":
-            continue
-        message = entry_json.get("msg") or ""
-        if "Coraza:" not in message:
-            continue
-
-        found = _UNIQUE_ID.search(message)
-        if not found:
-            continue
-        entry = requests.setdefault(
-            found.group(1),
-            {"score": 0, "families": set(), "uri": "/", "ip": ""})
-
-        score = _SCORE.search(message)
-        if score:
-            entry["score"] = max(entry["score"], int(score.group(1)))
-
-        uri = _URI.search(message)
-        if uri:
-            entry["uri"] = uri.group(1)
-
-        ip = _CLIENT.search(message)
-        if ip:
-            entry["ip"] = ip.group(1)
-
-        for tag in _TAG.findall(message):
-            if tag in _ATTACK_NAMES:
-                entry["families"].add(_ATTACK_NAMES[tag])
-
-    if not requests:
-        return {**empty, "enabled": True, "hours": hours}
-
-    attacks: dict[str, int] = {}
-    paths: dict[str, int] = {}
-    addresses: dict[str, int] = {}
-    would_block = 0
-    worst = 0
-
-    for entry in requests.values():
-        worst = max(worst, entry["score"])
-        if entry["score"] >= _BLOCKING_THRESHOLD:
-            would_block += 1
-        for family in entry["families"] or {"uncategorised"}:
-            attacks[family] = attacks.get(family, 0) + 1
-        # Stripping the query entirely makes every injection attempt look
-        # like "/", because the payload is in the query and the path is
-        # bare. A scanner probing /.env is described by its path; an
-        # injection is described by its query. Keep a trimmed query only
-        # when the path alone says nothing.
-        raw = entry["uri"]
-        path, _, query = raw.partition("?")
-        path = path or "/"
-        if path == "/" and query:
-            label = f"/?{unquote(query)[:44]}"
-        else:
-            label = path[:60]
-        paths[label] = paths.get(label, 0) + 1
-        if entry["ip"]:
-            addresses[entry["ip"]] = addresses.get(entry["ip"], 0) + 1
-
-    countries: dict[str, int] = {}
-    for ip, n in addresses.items():
-        origin = resolve_origin(ip)
-        name = origin.country_name or origin.country or "unknown"
-        countries[name] = countries.get(name, 0) + n
-
-    def top(counts: dict, limit: int = 6) -> list[dict]:
-        return [{"label": k, "n": v} for k, v in
-                sorted(counts.items(), key=lambda x: -x[1])[:limit]]
-
+    empty = not any([data["waf"]["detections"], data["blocked"],
+                     data["refusals"]])
     return {
-        "enabled": True, "hours": hours, "note": None,
-        "detections": len(requests), "would_block": would_block,
-        "sources": len(addresses), "worst_score": worst,
-        "attacks": top(attacks), "countries": top(countries),
-        "paths": top(paths),
-    }
-
-
-def _edge_blocks() -> dict:
-    """Requests Caddy stopped before they reached this application.
-
-    A different source from everything else on the page, because a blocked
-    request never becomes a search and so never becomes a row.
-
-    Returns a reason when it cannot read rather than an empty result. An
-    earlier version caught OSError and returned nothing, so a log the app
-    lacked permission to open reported as a quiet edge - which is the same
-    mistake as reading missing weather data as calm air, in a different
-    place.
-    """
-    path = os.environ.get("TURBULENCE_CADDY_LOG", "/var/log/caddy/access.log")
-
-    if not os.path.exists(path):
-        return {"readable": False, "note": f"no access log at {path}",
-                "counts": [], "countries": []}
-    if not os.access(path, os.R_OK):
-        return {"readable": False,
-                "note": ("the access log is not readable by this service. "
-                         "Caddy creates it mode 600; add `mode 644` to the "
-                         "log output block."),
-                "counts": [], "countries": []}
-
-    try:
-        with open(path, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            fh.seek(max(0, fh.tell() - 400_000))
-            tail = fh.read().decode("utf-8", "replace")
-    except OSError as e:
-        return {"readable": False, "note": f"{type(e).__name__} reading {path}",
-                "counts": [], "countries": []}
-
-    counts = {"geo filter": 0, "rate limit": 0}
-    addresses: dict[str, int] = {}
-    console_lines = 0
-
-    for line in tail.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if not line.startswith("{"):
-            console_lines += 1
-            continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-
-        status = entry.get("status")
-        if status == 403:
-            counts["geo filter"] += 1
-        elif status == 429:
-            counts["rate limit"] += 1
-        else:
-            continue
-
-        ip = ((entry.get("request") or {}).get("remote_ip") or "").strip()
-        if ip:
-            addresses[ip] = addresses.get(ip, 0) + 1
-
-    if console_lines and not any(counts.values()):
-        return {"readable": False,
-                "note": ("the access log is in console format, which drops "
-                         "the fields this needs. Set `format json` on the "
-                         "log directive."),
-                "counts": [], "countries": []}
-
-    # Resolved per unique address rather than per line: a scanner makes
-    # many requests from one place, and the lookup is the expensive part.
-    # Named rather than coded. A reader should not have to know that CN is
-    # China, and the database carries the name already.
-    countries: dict[str, int] = {}
-    for ip, n in addresses.items():
-        origin = resolve_origin(ip)
-        name = origin.country_name or origin.country or "unknown"
-        countries[name] = countries.get(name, 0) + n
-
-    return {
-        "readable": True,
-        "note": None,
-        "counts": [{"reason": k, "n": v} for k, v in counts.items() if v],
-        "countries": [{"country": k, "n": v} for k, v in
-                      sorted(countries.items(), key=lambda x: -x[1])[:8]],
+        **data,
+        "available": True,
+        "note": ("No edge events recorded yet. These arrive from a timer "
+                 "rather than from searches, so check that "
+                 "ingest-edge-events.timer is running." if empty else None),
     }
 
 

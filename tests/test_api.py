@@ -1033,3 +1033,74 @@ class TestSameAirportIsRejected:
                         json={"origin": "KPIT", "dest": "KPIT"})
         assert r.status_code == 422
         assert "calls_used" not in r.text
+
+
+class TestDepartureTimeReachesTheForecast:
+    """The forecast layer accepts a time and filters advisories to those
+    valid at it. Nothing was supplying one, so every search asked what the
+    air is like now and presented the answer as though it were about the
+    requested departure.
+
+    A G-AIRMET carries forecasts for +0, +3 and +6 hours in a single
+    issuance, so for a departure inside that window the right one was
+    already fetched and then discarded.
+    """
+
+    def _target(self, date=None, time_of_day=None):
+        from app.web.service import _target_time
+        return _target_time(date, time_of_day)
+
+    def test_a_departure_inside_the_horizon_sets_the_time(self):
+        from datetime import datetime, timedelta, timezone
+        soon = (datetime.now(timezone.utc)
+                + timedelta(hours=3)).strftime("%H:%M")
+        when, note = self._target(None, soon)
+        assert when is not None
+        assert note is None
+
+    def test_a_departure_beyond_the_horizon_says_so(self):
+        """Falling back to now is defensible only if the agent says it is
+        doing that. Otherwise it describes one thing while appearing to
+        describe another."""
+        from datetime import datetime, timedelta, timezone
+        far = datetime.now(timezone.utc) + timedelta(days=4)
+        when, note = self._target(far.strftime("%Y-%m-%d"),
+                                  far.strftime("%H:%M"))
+        assert when is None
+        assert "not at departure" in note
+
+    def test_a_past_departure_says_so(self):
+        from datetime import datetime, timedelta, timezone
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        when, note = self._target(past.strftime("%Y-%m-%d"), "12:00")
+        assert when is None
+        assert "in the past" in note
+
+    def test_a_time_of_day_already_past_means_tomorrow(self):
+        """23:50 requested at 00:10 is ten hours out, not fourteen hours
+        ago."""
+        from datetime import datetime, timedelta, timezone
+        earlier = (datetime.now(timezone.utc)
+                   - timedelta(hours=2)).strftime("%H:%M")
+        when, note = self._target(None, earlier)
+        # Either it lands tomorrow inside the horizon, or it is beyond it
+        # and says so. It must never silently describe the past.
+        assert when is not None or "hours away" in (note or "")
+
+    @pytest.mark.parametrize("date,time_of_day", [
+        (None, None), ("not-a-date", "99:99"), ("2026-13-45", "12:00")])
+    def test_unparseable_input_falls_back_quietly(self, date, time_of_day):
+        """A malformed date is already rejected by the API pattern. If one
+        reaches here it must not raise, and it must not invent a note about
+        a horizon it never computed."""
+        when, note = self._target(date, time_of_day)
+        assert when is None
+        assert note is None
+
+    def test_the_horizon_note_reaches_the_response(self, client):
+        from datetime import datetime, timedelta, timezone
+        far = datetime.now(timezone.utc) + timedelta(days=4)
+        data = do_search(client, departure_date=far.strftime("%Y-%m-%d"),
+                         departure_time="14:00")
+        assert any("not at departure" in n for n in data["notes"]), (
+            "the reader is told the reading is about now, not the departure")
