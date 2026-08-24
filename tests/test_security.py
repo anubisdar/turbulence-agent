@@ -314,6 +314,7 @@ class TestBrowserProtections:
             "https://fonts.gstatic.com",          # font files
             "https://*.basemaps.cartocdn.com",    # map tiles
             "https://cdnjs.cloudflare.com",       # Chart.js
+            "https://challenges.cloudflare.com",  # Turnstile widget
         }
         unexpected = allowed - expected
         assert not unexpected, f"the policy allows origins nobody asked for: {unexpected}"

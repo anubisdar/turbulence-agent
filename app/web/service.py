@@ -214,6 +214,9 @@ class SearchRequest:
     include_explanation: bool = False
     #: Used to resolve a country and then discarded. Never stored.
     client_ip: str | None = None
+    #: How this request got past the challenge: not_required, session,
+    #: solved, or absent when nothing set it.
+    challenge: str | None = None
 
 
 def _build_client(req: SearchRequest, api_key: str | None
@@ -570,7 +573,8 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
             init_runs(runs_conn)
             record_run(runs_conn, from_payload(
                 payload, request_id, timings,
-                origin_info=resolve_origin(req.client_ip)))
+                origin_info=resolve_origin(req.client_ip),
+                challenge=req.challenge))
             runs_conn.close()
         except Exception as e:  # noqa: BLE001
             log.warning("could not record the run " + kv(error=type(e).__name__))

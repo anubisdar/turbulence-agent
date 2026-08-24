@@ -61,6 +61,12 @@ main{padding:22px; max-width:1180px; margin:0 auto}
 /* A list of short labels reads better in columns than stretched across
    the page, and the panel stays a sensible height as the list grows. */
 .cols .rows{column-count:3; column-gap:34px}
+.waf-cols{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:26px}
+@media (max-width:760px){ .waf-cols{grid-template-columns:1fr} }
+.col-head{
+  font:11px/1 "IBM Plex Mono",monospace; letter-spacing:.12em;
+  text-transform:uppercase; color:var(--dim); margin-bottom:8px;
+}
 @media (max-width:760px){ .cols .rows{column-count:2} }
 .cols .row{break-inside:avoid}
 .row{display:flex; justify-content:space-between; gap:12px; padding:6px 0; border-bottom:1px solid var(--rule)}
@@ -248,6 +254,30 @@ function render(d){
 
     <div class="grid g2">
       <div class="panel">
+        <h2>The challenge</h2>
+        <p class="note">how each search got past it, and what it turned away</p>
+        ${(d.challenges || []).some(c => c.outcome !== 'not_required'
+                                      && c.outcome !== 'not recorded')
+          ? rows(d.challenges,
+                 r => ({session: 'existing session',
+                        solved: 'solved the challenge',
+                        not_required: 'challenge not enabled',
+                        'not recorded': 'before this was recorded'
+                       }[r.outcome] || r.outcome),
+                 r => r.n, '')
+          : `<div class="empty">The challenge is not enabled, so every
+             search went straight through.</div>`}
+        ${(d.challenge_refusals || {}).enabled && d.challenge_refusals.readable
+          ? `<div class="aside">Turned away in the last
+             ${d.challenge_refusals.hours} hours:
+             <b>${n(d.challenge_refusals.no_token)}</b> presented no token,
+             <b>${n(d.challenge_refusals.rejected)}</b> presented one that
+             failed. A refused request never becomes a search, so these are
+             counted from the journal rather than the database.</div>`
+          : ''}
+      </div>
+
+      <div class="panel">
         <h2>Where requests come from</h2>
         <p class="note">region and network, resolved at write time. The
           address itself is never stored.</p>
@@ -270,6 +300,50 @@ function render(d){
           other country is blocked. A request from Amazon or DigitalOcean is
           automation; one from a domestic carrier is a person.</div>
       </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:16px">
+      <h2>Web application firewall</h2>
+      <p class="note">${(d.waf || {}).enabled
+        ? `detection only &middot; every one of these was allowed through to
+           the application`
+        : 'not reporting'}</p>
+      ${!(d.waf || {}).enabled
+        ? `<div class="empty">${esc((d.waf || {}).note
+             || 'The firewall is not reporting.')}</div>`
+        : !d.waf.detections
+        ? `<div class="empty">Nothing detected in the last ${d.waf.hours}
+           hours.</div>`
+        : `
+        <div class="big">
+          <b>${n(d.waf.detections)}</b>
+          <span>detections from <b>${n(d.waf.sources)}</b>
+            source${d.waf.sources === 1 ? '' : 's'} in the last
+            ${d.waf.hours} hours &middot; worst anomaly score
+            <b>${n(d.waf.worst_score)}</b></span>
+        </div>
+        <div class="waf-cols">
+          <div>
+            <div class="col-head">what</div>
+            ${rows(d.waf.attacks, r => r.label, r => r.n, '')}
+          </div>
+          <div>
+            <div class="col-head">from where</div>
+            ${rows(d.waf.countries, r => r.label, r => r.n, '')}
+          </div>
+          <div>
+            <div class="col-head">what they wanted</div>
+            ${rows(d.waf.paths, r => r.label, r => r.n, '')}
+          </div>
+        </div>
+        <div class="aside accent"><b>${n(d.waf.would_block)}</b> of these
+          scored 5 or more, which is where the rule set refuses a request.
+          Those are what would be turned away if the engine moved from
+          detection to blocking.</div>
+        <div class="aside">The firewall runs before the geo filter, so it
+          sees traffic no other panel does &mdash; including requests
+          rejected a moment later for being outside the US. Counted per
+          request: one request tripping four rules is one detection.</div>`}
     </div>
 
     <div class="panel">

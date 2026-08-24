@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS search_runs (
     region              TEXT,
     asn_number          TEXT,
     asn_name            TEXT,
+    challenge           TEXT,
 
     -- outcome
     reading             TEXT,
@@ -100,6 +101,7 @@ _EXPECTED_COLUMNS = {
     "region": "TEXT",
     "asn_number": "TEXT",
     "asn_name": "TEXT",
+    "challenge": "TEXT",
 }
 
 
@@ -115,6 +117,10 @@ class RunRecord:
     region: str | None = None
     asn_number: str | None = None
     asn_name: str | None = None
+    #: How the request got past the challenge. Refusals never reach here,
+    #: because a refused request never becomes a search - those are counted
+    #: from the log instead.
+    challenge: str | None = None
 
     reading: str | None = None
     observed_reading: str | None = None
@@ -347,7 +353,8 @@ def record_run(conn: sqlite3.Connection, run: RunRecord,
 def from_payload(payload: dict[str, Any], request_id: str,
                  timings: Timings | None = None,
                  country: str | None = None,
-                 origin_info: "Origin | None" = None) -> RunRecord:
+                 origin_info: "Origin | None" = None,
+                 challenge: str | None = None) -> RunRecord:
     """Build a record from a finished search payload."""
     request = payload.get("request") or {}
     outcome = payload.get("outcome") or {}
@@ -369,6 +376,7 @@ def from_payload(payload: dict[str, Any], request_id: str,
         region=(origin_info.region if origin_info else None),
         asn_number=(origin_info.asn_number if origin_info else None),
         asn_name=(origin_info.asn_name if origin_info else None),
+        challenge=challenge,
         reading=outcome.get("reading"),
         observed_reading=(wx.get("observed") or {}).get("reading"),
         forecast_reading=(wx.get("forecast") or {}).get("reading"),
@@ -495,8 +503,15 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
         FROM search_runs WHERE started_at >= ?
         GROUP BY network, asn ORDER BY n DESC LIMIT 8""", (since,))
 
+    challenges = _rows(conn, """
+        SELECT COALESCE(challenge, 'not recorded') AS outcome,
+               COUNT(*) AS n
+        FROM search_runs WHERE started_at >= ?
+        GROUP BY outcome ORDER BY n DESC""", (since,))
+
     return {
         "window_days": days,
+        "challenges": challenges,
         "totals": totals,
         "median_seconds": median,
         "daily": daily,

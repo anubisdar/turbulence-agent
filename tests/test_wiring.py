@@ -21,6 +21,8 @@ before it left the machine.
 """
 
 import ast
+import os
+import json
 import inspect
 import subprocess
 import sys
@@ -667,3 +669,136 @@ class TestCountryNamesRatherThanCodes:
         from app.web import api
         source = inspect.getsource(api._edge_blocks)
         assert "country_name" in source
+
+
+class TestWafDetections:
+    """Read from journald, not from a Coraza audit file.
+
+    The audit log was the obvious source and turned out to be unusable:
+    its JSON formatter emits full request headers regardless of
+    SecAuditLogParts, and Coraza does not implement
+    SecSanitiseRequestHeader. The result was a file on disk containing the
+    Authorization header of every authenticated request, with no
+    configuration that removes it. journald carries the same detections
+    without a second copy of the credentials.
+    """
+
+    def _line(self, rule="942100", tag="attack-sqli", uri="/?id=1",
+              uid="abc123", ip="45.155.205.7", score=None):
+        msg = (f'[client "{ip}"] Coraza: Warning. matched '
+               f'[id "{rule}"] [severity "critical"] '
+               f'[tag "application-multi"] [tag "{tag}"] '
+               f'[tag "OWASP_CRS"] [uri "{uri}"] [unique_id "{uid}"]')
+        if score is not None:
+            msg = (f'[client "{ip}"] Coraza: Warning. Inbound Anomaly Score '
+                   f'Exceeded (Total Score: {score}) [id "949110"] '
+                   f'[tag "anomaly-evaluation"] [uri "{uri}"] '
+                   f'[unique_id "{uid}"]')
+        return json.dumps({"level": "error", "ts": 1787516236.7,
+                           "logger": "http.handlers.waf", "msg": msg})
+
+    def _read(self, monkeypatch, tmp_path, lines):
+        script = tmp_path / "journalctl"
+        log = tmp_path / "journal.txt"
+        log.write_text("\n".join(lines) + "\n")
+        script.write_text(f"#!/bin/sh\ncat {log}\n")
+        script.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+        from app.web.api import _waf_detections
+        return _waf_detections()
+
+    def test_one_request_with_four_rules_counts_once(self, monkeypatch,
+                                                     tmp_path):
+        """The four test vectors run against the deployment produced
+        thirteen log lines between them. A line count would be wrong by a
+        factor of three."""
+        result = self._read(monkeypatch, tmp_path, [
+            self._line(rule="930100", tag="attack-lfi", uid="same"),
+            self._line(rule="930110", tag="attack-lfi", uid="same"),
+            self._line(rule="930120", tag="attack-lfi", uid="same"),
+            self._line(rule="932160", tag="attack-rce", uid="same"),
+            self._line(uid="same", score=40),
+        ])
+        assert result["detections"] == 1
+        assert result["worst_score"] == 40
+
+    def test_a_request_can_belong_to_two_attack_families(self, monkeypatch,
+                                                         tmp_path):
+        """Traversal against /etc/passwd trips both LFI and RCE rules. Both
+        are true and both are worth counting."""
+        result = self._read(monkeypatch, tmp_path, [
+            self._line(tag="attack-lfi", uid="x"),
+            self._line(tag="attack-rce", uid="x"),
+            self._line(uid="x", score=40),
+        ])
+        assert result["detections"] == 1
+        assert {a["label"] for a in result["attacks"]} == {
+            "path traversal", "remote command execution"}
+
+    def test_the_anomaly_score_decides_would_block(self, monkeypatch,
+                                                   tmp_path):
+        """The rule set refuses at 5. Below that a match is noted and the
+        request proceeds even with the engine on."""
+        result = self._read(monkeypatch, tmp_path, [
+            self._line(uid="a"), self._line(uid="a", score=4),
+            self._line(uid="b"), self._line(uid="b", score=5),
+            self._line(uid="c"), self._line(uid="c", score=40),
+        ])
+        assert result["detections"] == 3
+        assert result["would_block"] == 2
+
+    def test_attack_tags_become_readable_names(self, monkeypatch, tmp_path):
+        result = self._read(monkeypatch, tmp_path, [
+            self._line(tag="attack-reputation-scanner", uid="a"),
+            self._line(tag="attack-lfi", uid="b"),
+            self._line(tag="attack-xss", uid="c"),
+        ])
+        assert {a["label"] for a in result["attacks"]} == {
+            "scanner detection", "path traversal", "cross-site scripting"}
+
+    def test_sources_count_addresses_not_requests(self, monkeypatch,
+                                                  tmp_path):
+        result = self._read(monkeypatch, tmp_path, [
+            self._line(ip="45.155.205.7", uid="a"),
+            self._line(ip="45.155.205.7", uid="b"),
+            self._line(ip="185.220.101.9", uid="c"),
+        ])
+        assert result["detections"] == 3
+        assert result["sources"] == 2
+
+    def test_a_bare_path_keeps_its_query(self, monkeypatch, tmp_path):
+        """Stripping the query makes every injection look like "/", because
+        the payload is in the query and the path is bare."""
+        result = self._read(monkeypatch, tmp_path, [
+            self._line(uri="/?q=%3Cscript%3E", uid="a")])
+        assert result["paths"][0]["label"].startswith("/?q=<script>")
+
+    def test_a_real_path_drops_its_query(self, monkeypatch, tmp_path):
+        """A scanner probing /.env is described by its path, and keeping
+        the query would make every probe unique."""
+        result = self._read(monkeypatch, tmp_path, [
+            self._line(uri="/.env?a=1", uid="a"),
+            self._line(uri="/.env?b=2", uid="b")])
+        assert result["paths"] == [{"label": "/.env", "n": 2}]
+
+    def test_non_waf_lines_are_ignored(self, monkeypatch, tmp_path):
+        result = self._read(monkeypatch, tmp_path, [
+            json.dumps({"logger": "http.log.access", "msg": "handled"}),
+            json.dumps({"logger": "tls", "msg": "certificate obtained"}),
+            "not json at all",
+            self._line(uid="a"),
+        ])
+        assert result["detections"] == 1
+
+    def test_the_logger_is_matched_on_the_field_not_the_raw_text(
+            self, monkeypatch, tmp_path):
+        """Caddy writes compact JSON with no space after the colon. Matching
+        raw text broke against any writer that formats differently, which
+        is how this was found."""
+        spaced = json.dumps(
+            {"level": "error", "logger": "http.handlers.waf",
+             "msg": '[client "1.2.3.4"] Coraza: Warning. matched '
+                    '[tag "attack-sqli"] [uri "/x"] [unique_id "z"]'},
+            indent=None, separators=(", ", ": "))
+        result = self._read(monkeypatch, tmp_path, [spaced])
+        assert result["detections"] == 1

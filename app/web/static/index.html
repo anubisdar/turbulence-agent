@@ -129,6 +129,10 @@ input:focus-visible,button:focus-visible,.row:focus-visible,.tab:focus-visible{
 .toggle input{accent-color:var(--live);width:15px;height:15px}
 .toggle:hover{color:var(--ink)}
 
+.challenge{margin-top:12px}
+.challenge-note{
+  margin-top:8px; font-size:12px; line-height:1.5; color:var(--dim);
+}
 .go{
   width:100%;margin-top:14px;padding:11px;cursor:pointer;
   background:var(--live);color:var(--on-live);border:0;border-radius:0;
@@ -383,6 +387,15 @@ pre .p{color:var(--dead)}
             Replay saved data instead of calling live</label>
         </div>
         <button class="go" id="go">Search corridors</button>
+        <!-- Rendered only when the server says Turnstile is configured, so
+             a development instance is not blocked by a widget that has no
+             site key to talk to. -->
+        <div id="challenge" class="challenge" hidden>
+          <div id="turnstile-widget"></div>
+          <div class="challenge-note">A one-off check that a person is
+            asking. Each search spends against a metered flight data
+            allowance.</div>
+        </div>
 
         <details class="adv">
           <summary>Search settings</summary>
@@ -433,6 +446,8 @@ pre .p{color:var(--dead)}
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
+        async defer></script>
 <script>
 const WEIGHTS = [
   ['provenance', 0.40, 'PROV'],
@@ -479,6 +494,51 @@ let selected = null;
 let lastData = null;
 
 const $ = id => document.getElementById(id);
+
+// A Turnstile token is single use and expires in about five minutes, so it
+// is cleared after each search and a fresh one requested. The server issues
+// a session cookie on the first success, so later searches do not wait on
+// the widget at all.
+let turnstileToken = null;
+let turnstileWidgetId = null;
+
+async function setUpChallenge(){
+  let config;
+  try {
+    config = await (await fetch('/api/config')).json();
+  } catch (e) {
+    return;                       // not configured is not an error
+  }
+  if(!config.turnstile_enabled || !config.turnstile_site_key) return;
+
+  const holder = $('challenge');
+  holder.hidden = false;
+
+  const render = () => {
+    turnstileWidgetId = window.turnstile.render('#turnstile-widget', {
+      sitekey: config.turnstile_site_key,
+      theme: document.documentElement.dataset.theme === 'light'
+        ? 'light' : 'dark',
+      callback: token => { turnstileToken = token; },
+      'expired-callback': () => { turnstileToken = null; },
+      'error-callback': () => { turnstileToken = null; },
+    });
+  };
+
+  // The script is loaded async, so it may not have defined window.turnstile
+  // by the time this runs.
+  if(window.turnstile && window.turnstile.render) render();
+  else window.onloadTurnstileCallback = render;
+}
+
+function resetChallenge(){
+  turnstileToken = null;
+  if(turnstileWidgetId !== null && window.turnstile){
+    try { window.turnstile.reset(turnstileWidgetId); } catch (e) {}
+  }
+}
+
+setUpChallenge();
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -790,12 +850,14 @@ async function run(){
   };
   if($('date').value) body.departure_date = $('date').value;
   if($('time').value) body.departure_time = $('time').value;
+  if(turnstileToken) body.turnstile_token = turnstileToken;
 
   try{
     const res = await fetch('/api/search/corridors', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(body)});
     const data = await res.json();
+    resetChallenge();
     if(!res.ok) throw new Error(
       typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail));
 

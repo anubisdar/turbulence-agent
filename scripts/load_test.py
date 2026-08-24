@@ -20,6 +20,8 @@ interesting. The set deliberately includes:
   - routes over water, where pilot reports are sparse
   - routes over the Rockies, where turbulence forecasts are common
   - a transpacific pair, to keep the antimeridian path exercised
+  - an over-water pair with no land beneath most of it, where the absence
+    of pilot reports is a property of the ocean rather than of the agent
 
 Costs real API calls: roughly 8 per route, so about 160 for a full run.
 Pace it or the upstream rate limiter will start refusing, which the report
@@ -35,6 +37,7 @@ Usage:
 import argparse
 import base64
 import json
+import os
 import statistics
 import sys
 import time
@@ -42,27 +45,17 @@ import urllib.error
 import urllib.request
 
 #: (origin, destination, why this pair is here)
+#:
+#: A second set, sharing no airport with the first. Reusing airports would
+#: mean reusing a warm fix cache, so a repeat run would measure the cache
+#: rather than the agent. These 26 airports have never been searched, which
+#: makes the first pass a genuine cold-cache measurement.
+#:
+#: Chosen for variety in the things that change the answer: route length
+#: from 253 to 4,479 nm, terrain from gulf coast to the Sierra, and data
+#: availability from the well-observed northeast corridor to two thousand
+#: miles of open Pacific.
 ROUTES = [
-    ("KSEA", "KBOS", "transcontinental, northern"),
-    ("KLAX", "KJFK", "transcontinental, the busiest pair in the country"),
-    ("KDEN", "KATL", "over the plains, out of high terrain"),
-    ("KORD", "KDFW", "midwest to Texas, heavy traffic"),
-    ("KSFO", "KORD", "over the Rockies, forecast turbulence common"),
-    ("KIAH", "KLAS", "southwest desert crossing"),
-    ("KMSP", "KPHX", "long diagonal, sparse middle"),
-    ("KMIA", "KEWR", "coastal, mostly over water"),
-    ("KSLC", "KMCO", "west to Florida, crosses several air masses"),
-    ("KPDX", "KDEN", "northwest into the Front Range"),
-    ("KCLT", "KDEN", "southeast to the Rockies"),
-    ("KBNA", "KLAX", "mid-south transcontinental"),
-    ("KDTW", "KMCO", "midwest to Florida, well-flown"),
-    ("KPHL", "KORD", "short-haul, corridors converge"),
-    ("KSAN", "KSFO", "west coast, short but distinct routings"),
-    ("KAUS", "KATL", "gulf coast"),
-    ("KBOS", "KMIA", "full east coast run"),
-    ("KLAS", "KSEA", "desert to the Pacific northwest"),
-    ("KANC", "KSEA", "Alaska to the lower 48, sparse reporting"),
-    ("KSEA", "RJTT", "transpacific, crosses the antimeridian"),
     ("KDCA", "KSJC", "transcontinental, mid-atlantic to the bay"),
     ("KBWI", "KOAK", "transcontinental, low-cost trunk route"),
     ("KOKC", "KMDW", "southern plains into the midwest"),
@@ -86,7 +79,7 @@ ROUTES = [
 ]
 
 
-def request(host, path, body, auth, timeout=180):
+def request(host, path, body, auth, timeout=180, operator=None):
     url = f"{host}{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
@@ -95,6 +88,11 @@ def request(host, path, body, auth, timeout=180):
     if auth:
         req.add_header("Authorization", "Basic " + base64.b64encode(
             auth.encode()).decode())
+    if operator:
+        # This script is an automated client, which is precisely what the
+        # challenge on the site exists to refuse. The token is how an
+        # operator says so rather than pretending to be a browser.
+        req.add_header("X-Operator-Token", operator)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())
 
@@ -108,6 +106,11 @@ def main() -> int:
                     help="how many of the twenty to run")
     ap.add_argument("--cap", type=int, default=16)
     ap.add_argument("--explain", action="store_true")
+    ap.add_argument("--operator-token",
+                    default=os.environ.get("TURBULENCE_OPERATOR_TOKEN"),
+                    help="defaults to $TURBULENCE_OPERATOR_TOKEN. Prefer the "
+                         "environment variable: a command-line argument is "
+                         "visible in ps output and shell history")
     ap.add_argument("--pause", type=float, default=8.0,
                     help="seconds between routes; below about 5 the upstream "
                          "rate limiter starts refusing")
@@ -117,6 +120,12 @@ def main() -> int:
     auth = (f"{args.user}:{args.password}"
             if args.user and args.password else None)
     routes = ROUTES[:max(1, min(args.routes, len(ROUTES)))]
+
+    if not args.operator_token and not host.startswith("http://127."):
+        print("  no operator token set. If the site has a challenge in front "
+              "of it,\n  every search will be refused. Set "
+              "TURBULENCE_OPERATOR_TOKEN, or run\n  this from the instance "
+              "against http://127.0.0.1:8000.\n")
 
     print(f"Running {len(routes)} routes against {host}")
     print(f"  cap {args.cap} calls · explainer "
@@ -139,7 +148,8 @@ def main() -> int:
             "include_explanation": args.explain,
         }
         try:
-            data = request(host, "/api/search/corridors", body, auth)
+            data = request(host, "/api/search/corridors", body, auth,
+                           operator=args.operator_token)
         except urllib.error.HTTPError as e:
             print(f"  {origin}-{dest:<7} HTTP {e.code}: "
                   f"{e.read().decode('utf-8', 'replace')[:70]}")
@@ -258,7 +268,7 @@ def main() -> int:
         print(f"\n\033[1mWorth a look\033[0m")
         for r in thin:
             print(f"  {r['route']:<12} only {r['nodes']} node(s) "
-                  f"� {r['note']}")
+                  f"— {r['note']}")
 
     print(f"\n  Status page: {host}/status")
     return 1 if len(ok) < len(results) else 0

@@ -180,6 +180,13 @@ TURBULENCE_PUBLIC=1
 # and it should stay off on a public deployment.
 TURBULENCE_LOG_TRIP_CONTENT=0
 
+# Cloudflare Turnstile. Both halves are needed before the challenge appears;
+# with neither set the site behaves exactly as it did before. The site key is
+# public and rendered into the page; the secret key never leaves the server.
+# Get both free at dash.cloudflare.com -> Turnstile.
+TURNSTILE_SITE_KEY=
+TURNSTILE_SECRET_KEY=
+
 TURBULENCE_DB=$APP_DIR/data/retrieval.db
 HF_HOME=$APP_DIR/.cache/huggingface
 EOF
