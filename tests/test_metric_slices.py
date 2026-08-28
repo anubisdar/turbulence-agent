@@ -49,7 +49,7 @@ class TestTheSlicesSeparateRealDifferences:
         was known" would hide the failure inside the ordinary case."""
         record_run(conn, RunRecord(request_id="a", reading="unresolved",
                                    degraded=1))
-        assert "a source failed" in slices(conn)
+        assert "a source failed (pilot reports, forecast)" in slices(conn)
         assert "nothing was known" not in slices(conn)
 
     def test_a_truncated_search_takes_precedence_over_the_reading(self, conn):
@@ -116,7 +116,7 @@ class TestCostAndLatencyPerSlice:
             record_run(conn, RunRecord(request_id=f"r{i}", reading="light",
                                        api_calls=8, elapsed=14.0))
         found = slices(conn)
-        assert found["a source failed"]["mean_calls"] == 3.0
+        assert found["a source failed (pilot reports, forecast)"]["mean_calls"] == 3.0
         assert found["a reading, sources agreed"]["mean_calls"] == 8.0
 
     def test_an_empty_window_returns_no_slices_rather_than_failing(self, conn):

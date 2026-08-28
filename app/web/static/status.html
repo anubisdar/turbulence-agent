@@ -183,7 +183,10 @@ function render(d){
   $('window').textContent = `last ${d.window_days} days`;
   $('stamp').textContent = new Date().toISOString().slice(11, 16) + ' UTC';
   $('foot').textContent =
-    `${n(searches)} searches recorded. Region and network are resolved at write time; the address is discarded.`;
+    `${n(searches)} searches recorded. Region and network are resolved at write time; the address is discarded.`
+    + ((d.synthetic_runs || 0)
+        ? ` ${n(d.synthetic_runs)} replayed or fixture searches in this window are counted separately and excluded from every panel above.`
+        : '');
 
   if (!searches){
     $('main').innerHTML =
@@ -300,10 +303,11 @@ function render(d){
                <td class="n">${r.mean_calls ?? '-'}</td>
              </tr>`).join('')}
            </table>
-           <div class="aside">The explainer&rsquo;s acceptance rate was 91%
-             overall while every rejection sat on unresolved routes, and
-             every one of those turned out to be the validator being wrong.
-             A single number could not show that.</div>`
+           <div class="aside">A search that found nothing, a search whose
+             sources disagreed, and a search that lost a source are three
+             different questions. An average across all of them answers
+             none of them well, and a problem living in one slice
+             disappears into the total.</div>`
         : `<div class="empty">No searches recorded in this window.</div>`}
     </div>
 

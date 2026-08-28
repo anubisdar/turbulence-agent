@@ -683,6 +683,7 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
             record_run(runs_conn, from_payload(
                 payload, request_id, timings,
                 origin_info=resolve_origin(req.client_ip),
+                source="fixtures" if req.use_fixtures else "live",
                 challenge=req.challenge))
             runs_conn.close()
         except Exception as e:  # noqa: BLE001

@@ -99,6 +99,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_started ON search_runs(started_at);
 #: an existing table on start; anything in SCHEMA alone reaches only a fresh
 #: one.
 _EXPECTED_COLUMNS = {
+    "source": "TEXT",
     "region": "TEXT",
     "asn_number": "TEXT",
     "asn_name": "TEXT",
@@ -122,6 +123,11 @@ class RunRecord:
     #: How the request got past the challenge. Refusals never reach here,
     #: because a refused request never becomes a search - those are counted
     #: from the log instead.
+    #: How the search ran: "live" against the real APIs, or "fixtures"
+    #: against recorded ones. Both were written to this table
+    #: indistinguishably until 28 August, so a status page over that
+    #: period reported replay runs as production behaviour.
+    source: str = "live"
     challenge: str | None = None
     #: Facts that failed their shape check before reaching the model.
     #: Zero on every ordinary search; anything else means a provider sent
@@ -361,6 +367,7 @@ def from_payload(payload: dict[str, Any], request_id: str,
                  timings: Timings | None = None,
                  country: str | None = None,
                  origin_info: "Origin | None" = None,
+                 source: str = "live",
                  challenge: str | None = None) -> RunRecord:
     """Build a record from a finished search payload."""
     request = payload.get("request") or {}
@@ -433,8 +440,20 @@ def _rows(conn: sqlite3.Connection, sql: str, params=()) -> list[dict]:
 
 def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
             ) -> dict[str, Any]:
-    """Everything the status page needs, in one pass per panel."""
+    """Everything the status page needs, in one pass per panel.
+
+    Live runs only. Replay and fixture searches were written to the same
+    table with nothing to tell them apart, so a window holding 977
+    replayed searches and six real ones described the replay. They are
+    counted separately rather than dropped, because "how much of this
+    window was synthetic" is itself worth being able to answer.
+    """
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    synthetic = _rows(conn, """
+        SELECT COUNT(*) AS n FROM search_runs
+        WHERE started_at >= ? AND COALESCE(source, 'live') != 'live'
+        """, (since,))[0]["n"]
 
     totals = _rows(conn, """
         SELECT COUNT(*) AS searches,
@@ -442,10 +461,12 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
                SUM(api_calls) AS api_calls,
                SUM(degraded) AS degraded,
                SUM(truncated) AS truncated
-        FROM search_runs WHERE started_at >= ?""", (since,))[0]
+        FROM search_runs WHERE started_at >= ?
+          AND COALESCE(source, 'live') = 'live'""", (since,))[0]
 
     elapsed = [r["elapsed"] for r in _rows(
         conn, "SELECT elapsed FROM search_runs WHERE started_at >= ? "
+              "AND COALESCE(source, 'live') = 'live' "
               "AND elapsed IS NOT NULL ORDER BY elapsed", (since,))]
     median = elapsed[len(elapsed) // 2] if elapsed else None
 
@@ -454,6 +475,7 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
                COUNT(*) AS total,
                SUM(reading IS NOT NULL AND reading != 'unresolved') AS resolved
         FROM search_runs WHERE started_at >= ?
+          AND COALESCE(source, 'live') = 'live'
         GROUP BY day ORDER BY day""", (since,))
 
     sources = _rows(conn, """
@@ -465,6 +487,7 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
                  ELSE 'neither' END AS which,
                COUNT(*) AS n
         FROM search_runs WHERE started_at >= ?
+          AND COALESCE(source, 'live') = 'live'
         GROUP BY which ORDER BY n DESC""", (since,))
 
     timing = _rows(conn, """
@@ -473,7 +496,8 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
                AVG(retrieval_seconds) AS retrieval,
                AVG(explainer_seconds) AS explainer,
                AVG(scoring_seconds) AS scoring
-        FROM search_runs WHERE started_at >= ? AND elapsed IS NOT NULL""",
+        FROM search_runs WHERE started_at >= ?
+          AND COALESCE(source, 'live') = 'live' AND elapsed IS NOT NULL""",
         (since,))[0]
 
     models = _rows(conn, """
@@ -485,24 +509,28 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
                SUM(embedding_calls) AS embedding_calls,
                AVG(embedding_cpu_ms) AS embedding_cpu_ms,
                SUM(api_calls) AS api_calls
-        FROM search_runs WHERE started_at >= ?""", (since,))[0]
+        FROM search_runs WHERE started_at >= ?
+          AND COALESCE(source, 'live') = 'live'""", (since,))[0]
 
     rejections = _rows(conn, """
         SELECT llm_reject_reason AS reason, COUNT(*) AS n
         FROM search_runs
-        WHERE started_at >= ? AND llm_reject_reason IS NOT NULL
+        WHERE started_at >= ?
+          AND COALESCE(source, 'live') = 'live' AND llm_reject_reason IS NOT NULL
         GROUP BY reason ORDER BY n DESC LIMIT 6""", (since,))
 
     degraded = _rows(conn, """
         SELECT degraded_reason AS reason, COUNT(*) AS n
         FROM search_runs
-        WHERE started_at >= ? AND degraded_reason IS NOT NULL
+        WHERE started_at >= ?
+          AND COALESCE(source, 'live') = 'live' AND degraded_reason IS NOT NULL
         GROUP BY reason ORDER BY n DESC LIMIT 6""", (since,))
 
     regions = _rows(conn, """
         SELECT COALESCE(region, country, 'unknown') AS region,
                COUNT(*) AS n
         FROM search_runs WHERE started_at >= ?
+          AND COALESCE(source, 'live') = 'live'
         GROUP BY region ORDER BY n DESC LIMIT 8""", (since,))
 
     networks = _rows(conn, """
@@ -510,12 +538,14 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
                COALESCE(asn_number, '') AS asn,
                COUNT(*) AS n
         FROM search_runs WHERE started_at >= ?
+          AND COALESCE(source, 'live') = 'live'
         GROUP BY network, asn ORDER BY n DESC LIMIT 8""", (since,))
 
     challenges = _rows(conn, """
         SELECT COALESCE(challenge, 'not recorded') AS outcome,
                COUNT(*) AS n
         FROM search_runs WHERE started_at >= ?
+          AND COALESCE(source, 'live') = 'live'
         GROUP BY outcome ORDER BY n DESC""", (since,))
 
     # Zero on every ordinary search, so a non-zero value is the whole
@@ -524,7 +554,8 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
     fact_problems = _rows(conn, """
         SELECT COUNT(*) AS searches, SUM(fact_problems) AS problems
         FROM search_runs
-        WHERE started_at >= ? AND COALESCE(fact_problems, 0) > 0""",
+        WHERE started_at >= ?
+          AND COALESCE(source, 'live') = 'live' AND COALESCE(fact_problems, 0) > 0""",
         (since,))[0]
 
     # Sliced, not just totalled. An aggregate acceptance rate of 91% hid
@@ -538,7 +569,7 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
     by_outcome = _rows(conn, """
         SELECT
             CASE
-                WHEN degraded THEN 'a source failed'
+                WHEN degraded THEN 'a source failed (pilot reports, forecast)'
                 WHEN truncated THEN 'stopped on a budget'
                 WHEN reading = 'unresolved' THEN 'nothing was known'
                 WHEN sources_disagree THEN 'sources disagreed'
@@ -553,6 +584,7 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
             SUM(COALESCE(fact_problems, 0)) AS fact_problems
         FROM search_runs
         WHERE started_at >= ?
+          AND COALESCE(source, 'live') = 'live'
         GROUP BY slice ORDER BY searches DESC""", (since,))
 
     for row in by_outcome:
@@ -562,6 +594,7 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
 
     return {
         "window_days": days,
+        "synthetic_runs": synthetic,
         "challenges": challenges,
         "by_outcome": by_outcome,
         "fact_problems": {

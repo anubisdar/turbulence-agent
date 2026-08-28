@@ -110,17 +110,18 @@ def narrate(payload: dict[str, Any]) -> list[dict[str, Any]]:
     gained = (fixes.get("after", 0) or 0) - (fixes.get("before", 0) or 0)
     if gained > 0:
         beats.append(_beat(
-            STATE, "Memory",
-            f"Learned {gained} new navigation waypoints and stored them "
-            f"permanently. Route strings arrive as names with no coordinates; "
-            f"every lookup makes the next route on this airspace cheaper.",
+            STATE, "Waypoint cache",
+            f"Resolved {gained} new waypoint names to coordinates and stored "
+            f"them. A route arrives as names with no positions, and those "
+            f"positions do not change, so the next route across this "
+            f"airspace does not pay for the lookup again.",
             f"{fixes.get('before', 0)} to {fixes.get('after', 0)} cached fixes",
             pause=BEAT))
     elif fixes.get("after"):
         beats.append(_beat(
-            STATE, "Memory",
-            f"Every waypoint on these routes was already known from an "
-            f"earlier search, so no extra lookups were needed.",
+            STATE, "Waypoint cache",
+            f"Every waypoint on these routes was already resolved by an "
+            f"earlier search, so this one paid for no lookups.",
             f"{fixes['after']} cached fixes", pause=BEAT_SHORT))
 
     # ---------------------------------------------------------- evaluation
