@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS search_runs (
     asn_number          TEXT,
     asn_name            TEXT,
     challenge           TEXT,
+    fact_problems       INTEGER,
 
     -- outcome
     reading             TEXT,
@@ -102,6 +103,7 @@ _EXPECTED_COLUMNS = {
     "asn_number": "TEXT",
     "asn_name": "TEXT",
     "challenge": "TEXT",
+    "fact_problems": "INTEGER",
 }
 
 
@@ -121,6 +123,11 @@ class RunRecord:
     #: because a refused request never becomes a search - those are counted
     #: from the log instead.
     challenge: str | None = None
+    #: Facts that failed their shape check before reaching the model.
+    #: Zero on every ordinary search; anything else means a provider sent
+    #: something unexpected, or something tried to reach the model through
+    #: one of the two fields this system does not compute.
+    fact_problems: int = 0
 
     reading: str | None = None
     observed_reading: str | None = None
@@ -377,6 +384,8 @@ def from_payload(payload: dict[str, Any], request_id: str,
         asn_number=(origin_info.asn_number if origin_info else None),
         asn_name=(origin_info.asn_name if origin_info else None),
         challenge=challenge,
+        fact_problems=len(
+            ((payload.get("explanation") or {}).get("fact_problems")) or []),
         reading=outcome.get("reading"),
         observed_reading=(wx.get("observed") or {}).get("reading"),
         forecast_reading=(wx.get("forecast") or {}).get("reading"),
@@ -509,9 +518,56 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
         FROM search_runs WHERE started_at >= ?
         GROUP BY outcome ORDER BY n DESC""", (since,))
 
+    # Zero on every ordinary search, so a non-zero value is the whole
+    # signal. Counted rather than sampled: this is rare enough that every
+    # occurrence is worth seeing.
+    fact_problems = _rows(conn, """
+        SELECT COUNT(*) AS searches, SUM(fact_problems) AS problems
+        FROM search_runs
+        WHERE started_at >= ? AND COALESCE(fact_problems, 0) > 0""",
+        (since,))[0]
+
+    # Sliced, not just totalled. An aggregate acceptance rate of 91% hid
+    # the thing that mattered: every rejection was on an unresolved route,
+    # and every one of them was the validator being wrong. A single number
+    # cannot show a pattern that lives in a subset.
+    #
+    # The slices are the ways a search genuinely differs: whether anything
+    # was known, whether the two sources agreed, and whether the search ran
+    # to completion or hit a budget.
+    by_outcome = _rows(conn, """
+        SELECT
+            CASE
+                WHEN degraded THEN 'a source failed'
+                WHEN truncated THEN 'stopped on a budget'
+                WHEN reading = 'unresolved' THEN 'nothing was known'
+                WHEN sources_disagree THEN 'sources disagreed'
+                ELSE 'a reading, sources agreed'
+            END AS slice,
+            COUNT(*) AS searches,
+            SUM(llm_called) AS explained,
+            SUM(CASE WHEN llm_called AND llm_accepted THEN 1 ELSE 0 END)
+                AS accepted,
+            ROUND(AVG(elapsed), 1) AS median_seconds,
+            ROUND(AVG(api_calls), 1) AS mean_calls,
+            SUM(COALESCE(fact_problems, 0)) AS fact_problems
+        FROM search_runs
+        WHERE started_at >= ?
+        GROUP BY slice ORDER BY searches DESC""", (since,))
+
+    for row in by_outcome:
+        explained = row.get("explained") or 0
+        row["acceptance"] = (round((row.get("accepted") or 0) / explained, 3)
+                             if explained else None)
+
     return {
         "window_days": days,
         "challenges": challenges,
+        "by_outcome": by_outcome,
+        "fact_problems": {
+            "searches": fact_problems["searches"] or 0,
+            "problems": fact_problems["problems"] or 0,
+        },
         "totals": totals,
         "median_seconds": median,
         "daily": daily,

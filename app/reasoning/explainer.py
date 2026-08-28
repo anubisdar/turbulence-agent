@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from app.logging_setup import get_logger, kv
+from app.reasoning.fact_checks import report as report_facts
 from app.reasoning.critic import Severity
 
 log = get_logger("explainer")
@@ -75,60 +76,62 @@ _NEGATION_CUES = (
     "lack of", "nothing", "unresolved", "does not", "do not", "is not",
 )
 
-#: Verbs that turn a mention back into a claim about the air.
-_ASSERTION_VERBS = re.compile(
-    r"\b(?:is|are|was|were|be|being|says?|said|calls?|expect(?:ed|s)?|"
-    r"reports?|reported|indicates?|shows?|remains?|becomes?|looks?|"
-    r"feels?|likely)\b")
+#: Fragments shorter than this are not clauses. An enumeration such as
+#: "light, moderate, or severe" splits on its commas into pieces that
+#: belong to the phrase governing them, so they are merged back.
+_MIN_CLAUSE_WORDS = 3
 
-#: How many words after the verb still count as attached to it, so that
-#: "are entirely smooth" reads as an assertion rather than three unrelated
-#: words. Without this the adverb hides the verb and a claim escapes.
-_ASSERTION_WINDOW = 4
+
+def _clauses(sentence: str) -> list[str]:
+    """Split a sentence where a new assertion could begin.
+
+    Commas, semicolons and the coordinating conjunctions. A negation
+    governs its own clause and not the one after it, which is what
+    separates "not that the air is calm or smooth" from "nothing is known,
+    and conditions are entirely smooth".
+    """
+    parts = re.split(r"[;,]|\s+(?:and|but)\s+", sentence)
+    clauses: list[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if clauses and len(part.split()) < _MIN_CLAUSE_WORDS:
+            clauses[-1] += " " + part
+        else:
+            clauses.append(part)
+    return clauses
+
+
+def _denied(text: str, pattern: re.Pattern) -> bool:
+    """Whether every match sits inside a clause that denies it.
+
+    Clause-scoped rather than measured in words. An earlier version looked
+    at the four words before the match and asked whether an assertion verb
+    appeared there; that rejected "not that the air is calm or smooth",
+    where the negation is six words back and "is" is not. Three production
+    paragraphs were discarded that way, all of them accurate.
+
+    One plain assertion anywhere fails the whole check, so a claim cannot
+    be buried among denials.
+    """
+    found = False
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        for clause in _clauses(sentence):
+            for match in pattern.finditer(clause):
+                found = True
+                # The cue has to sit outside the match. "nothing to worry
+                # about" carries its own negation, and counting it would
+                # make the phrase exempt itself.
+                context = clause[:match.start()] + " " + clause[match.end():]
+                if not any(cue in context for cue in _NEGATION_CUES):
+                    return False
+    return found
 
 
 def _negated(text: str, word: str) -> bool:
-    """Whether every mention of a severity word sits inside a denial.
-
-    A severity named while denying it applies is not a claim about the air.
-    Observed in production on an unresolved route: the model wrote "there
-    is no basis in the available data to characterize conditions as light,
-    moderate, or severe" and was rejected three times for saying so. That
-    paragraph was this project's own argument in the model's words, and it
-    was discarded.
-
-    Narrowed three ways, because the cost of over-exempting is the exact
-    harm the validator exists to prevent:
-
-      the negation must appear earlier in the *same sentence*, so a denial
-      in one sentence cannot license a claim in the next;
-
-      an assertion verb between the negation and the severity word cancels
-      the exemption, unless that span is itself negated - so "conditions
-      are entirely smooth" fails while "the air is not light" does not;
-
-      *every* occurrence must be negated. One plain assertion anywhere
-      fails the whole check, so a claim cannot be buried among denials.
-    """
-    pattern = re.compile(rf"\b{word}\b")
-    found = False
-
-    for sentence in re.split(r"(?<=[.!?])\s+", text):
-        for match in pattern.finditer(sentence):
-            found = True
-            before = sentence[:match.start()]
-
-            if not any(cue in before for cue in _NEGATION_CUES):
-                return False
-
-            # The words immediately preceding decide whether the denial
-            # still governs this mention or something re-asserted since.
-            tail = " ".join(before.split()[-_ASSERTION_WINDOW:])
-            if (_ASSERTION_VERBS.search(tail)
-                    and not any(cue in tail for cue in _NEGATION_CUES)):
-                return False
-
-    return found
+    """Whether a severity word is only ever named while being denied."""
+    return _denied(text, re.compile(rf"\b{word}\b"))
 
 
 SEVERITY_WORDS = {
@@ -284,6 +287,11 @@ def validate(text: str, facts: dict[str, Any]) -> Verdict:
 
     for phrase in SOFTENING:
         if phrase in low:
+            # "that absence of information should not be mistaken for
+            # reassurance" is this project's own idiom, and the bare stem
+            # matched it. A phrase inside a denial is not reassurance.
+            if _denied(low, re.compile(re.escape(phrase))):
+                continue
             reasons.append(f"contains reassurance: {phrase!r}")
 
     allowed = {str(facts.get("reading") or "").lower(),
@@ -358,6 +366,15 @@ class Explanation:
     tokens_out: int | None = None
     rejected: list[str] = field(default_factory=list)
     facts: dict[str, Any] = field(default_factory=dict)
+    #: The instructions sent above the facts. Carried on the result rather
+    #: than read from the module constant, so what is shown is what was
+    #: actually used.
+    system_prompt: str = ""
+    #: Facts that did not match their expected shape before being sent.
+    #: Eleven of the twelve are computed here; the two that are passed
+    #: through from the flight data provider are the ones that could
+    #: carry text this system did not write.
+    fact_problems: list[str] = field(default_factory=list)
     #: What the model actually wrote when its output was rejected. Kept so
     #: a discarded explanation can be read afterwards. The reason alone -
     #: "names a severity the evidence does not hold" - says which rule
@@ -394,11 +411,24 @@ def explain(payload: dict[str, Any], client: ModelClient | None = None,
     was always going to be there.
     """
     facts = build_facts(payload)
+
+    # Checked before the facts are sent, not after. Eleven of the twelve
+    # fields are computed here and cannot carry a payload; the two that
+    # can are passed through from the flight data provider. A field
+    # outside its shape is either an upstream change or something trying
+    # to reach the model through one, and both want a person looking.
+    #
+    # Reported, not enforced. Refusing to explain a search because a
+    # provider sent an odd aircraft string would be a worse failure than
+    # explaining it, and the reading is not the model's to change either
+    # way.
+    fact_problems = report_facts(facts)
     fallback = (facts.get("plain_summary")
                 or "No turbulence assessment is available for this route.")
 
     if client is None:
-        return Explanation(text=fallback, source="deterministic", facts=facts)
+        return Explanation(system_prompt=SYSTEM_PROMPT, text=fallback, source="deterministic",
+                           facts=facts, fact_problems=fact_problems)
 
     user = ("Facts about this turbulence assessment:\n\n"
             + json.dumps(facts, indent=2)
@@ -410,7 +440,7 @@ def explain(payload: dict[str, Any], client: ModelClient | None = None,
         log.warning("explainer call failed, using the plain summary "
                     + kv(error=type(e).__name__,
                          reading=facts.get("reading")))
-        return Explanation(text=fallback, source="deterministic", facts=facts,
+        return Explanation(system_prompt=SYSTEM_PROMPT, fact_problems=fact_problems, text=fallback, source="deterministic", facts=facts,
                            rejected=[f"model call failed: {type(e).__name__}"])
 
     verdict = validate(text, facts)
@@ -425,7 +455,7 @@ def explain(payload: dict[str, Any], client: ModelClient | None = None,
                          reading=facts.get("reading"),
                          model=model_name or DEFAULT_MODEL))
         log.info("explainer discarded text " + kv(text=text.strip()))
-        return Explanation(text=fallback, source="deterministic", facts=facts,
+        return Explanation(system_prompt=SYSTEM_PROMPT, fact_problems=fact_problems, text=fallback, source="deterministic", facts=facts,
                            rejected=verdict.reasons, discarded_text=text.strip())
 
     _log_exchange(facts, text)
@@ -435,7 +465,7 @@ def explain(payload: dict[str, Any], client: ModelClient | None = None,
                   tokens_in=usage.get("tokens_in"),
                   tokens_out=usage.get("tokens_out"),
                   model=model_name or DEFAULT_MODEL))
-    return Explanation(text=text.strip(), source="model",
+    return Explanation(system_prompt=SYSTEM_PROMPT, fact_problems=fact_problems, text=text.strip(), source="model",
                        model=model_name or DEFAULT_MODEL, facts=facts,
                        tokens_in=usage.get("tokens_in"),
                        tokens_out=usage.get("tokens_out"))

@@ -28,6 +28,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 import time
+from dataclasses import replace
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
@@ -47,6 +48,7 @@ from app.runs import (
     record_run,
     resolve_origin,
 )
+from app.retrieval.airports import Airport, resolve_pair
 from app.reasoning.controller import Budget, SearchResult, search
 from app.reasoning.critic import Corridor
 from app.reasoning.generator import CorridorGenerator
@@ -199,10 +201,10 @@ class SearchRequest:
     beam_width: int = 2
     depth_limit: int = 2
     confidence_threshold: float = 0.85
-    max_tool_calls: int = 8
+    max_tool_calls: int = 12
     max_seconds: float = 60.0
     width_nm: float = 25.0
-    use_graph: bool = False
+    use_graph: bool = True
     use_fixtures: bool = False
     departure_time: str | None = None      # "HH:MM" UTC
     departure_date: str | None = None      # "YYYY-MM-DD", recorded not queried
@@ -212,7 +214,7 @@ class SearchRequest:
     include_turbulence: bool = True
     #: Off by default. The deterministic summary is already a complete
     #: answer; the model only rewrites it into something more readable.
-    include_explanation: bool = False
+    include_explanation: bool = True
     #: Used to resolve a country and then discarded. Never stored.
     client_ip: str | None = None
     #: How this request got past the challenge: not_required, session,
@@ -353,6 +355,15 @@ def _explain(payload: dict[str, Any], enabled: bool) -> dict[str, Any]:
         rejected.append(note)
     return {"text": out.text, "source": out.source, "model": out.model,
             "rejected": rejected, "enabled": True,
+            "fact_problems": out.fact_problems,
+            # The prompt and the discarded text, so the exchange can be
+            # inspected for the search in front of you rather than only in
+            # the journal. Both are already about this search: the facts
+            # carry a route the caller just typed, and the discarded text
+            # is what would otherwise vanish.
+            "facts": out.facts,
+            "system_prompt": out.system_prompt,
+            "discarded_text": out.discarded_text,
             "tokens_in": out.tokens_in, "tokens_out": out.tokens_out}
 
 
@@ -475,26 +486,58 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
     # zero-length path buffers to a polygon of no area whose containment
     # test rejects its own defining point, and the search that follows
     # observes nothing and says nothing about why.
-    if req.origin.strip().upper() == req.dest.strip().upper():
+    # Fliers know IATA codes; the provider speaks ICAO. Resolving here
+    # rather than at the edge means the API and the page get the same
+    # treatment, and a guess is carried forward as a guess.
+    o_air, d_air = resolve_pair(req.origin, req.dest)
+    if o_air is None:
         raise ServiceError(
-            f"{req.origin.strip().upper()} is both the origin and the "
+            f"{req.origin.strip()!r} is not an airport code. Enter a "
+            f"three-letter code like LAX or a four-letter one like KLAX.")
+    if d_air is None:
+        raise ServiceError(
+            f"{req.dest.strip()!r} is not an airport code. Enter a "
+            f"three-letter code like LAX or a four-letter one like KLAX.")
+
+    resolution_notes = [n for n in (o_air.note(), d_air.note()) if n]
+
+    # Compared after resolution, so BOS and KBOS are caught as the same
+    # airport rather than treated as a route.
+    if o_air.code == d_air.code:
+        raise ServiceError(
+            f"{o_air.code} is both the origin and the "
             f"destination, so there is no route between them to examine.")
 
     # Reuse the id the API layer established, so a log line written before
     # the search started correlates with the ones written during it. A new
     # context here would split one request across two ids.
+    resolved = replace(req, origin=o_air.code, dest=d_air.code)
+
     existing = current_request_id()
     if existing and existing != "-":
-        return _run_corridor_search(req, api_key, db_path, existing)
+        return _run_corridor_search(resolved, api_key, db_path, existing,
+                                    o_air, d_air)
     with request_context() as request_id:
-        return _run_corridor_search(req, api_key, db_path, request_id)
+        return _run_corridor_search(resolved, api_key, db_path, request_id,
+                                    o_air, d_air)
 
 
 def _run_corridor_search(req: SearchRequest, api_key: str | None,
-                         db_path: str, request_id: str) -> dict[str, Any]:
+                         db_path: str, request_id: str,
+                         o_air: Airport | None = None,
+                         d_air: Airport | None = None) -> dict[str, Any]:
+    # Callers that resolved already pass the airports through; the rest
+    # get codes treated as typed, which is what they were before.
+    if o_air is None:
+        o_air = Airport(code=req.origin.upper(), how="exact",
+                        typed=req.origin.upper())
+    if d_air is None:
+        d_air = Airport(code=req.dest.upper(), how="exact",
+                        typed=req.dest.upper())
+    resolution_notes = [n for n in (o_air.note(), d_air.note()) if n]
     timings = Timings()
     log.info("search started " + kv(
-        **trip_fields(req.origin.upper(), req.dest.upper(),
+        **trip_fields(o_air.code, d_air.code,
                       req.departure_time),
         beam=req.beam_width, depth=req.depth_limit,
         cap=req.max_tool_calls,
@@ -526,7 +569,7 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
 
         generator = CorridorGenerator(
             client=client, conn=conn,
-            origin=req.origin.upper(), dest=req.dest.upper(),
+            origin=o_air.code, dest=d_air.code,
             width_nm=req.width_nm, target_time=req.departure_time,
             when=forecast_when,
             fetch_pireps=fetch_pireps, gairmet_client=gairmet_client,
@@ -562,7 +605,9 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
 
         payload = {
             "request": {
-                "origin": req.origin.upper(), "dest": req.dest.upper(),
+                "origin": o_air.code, "dest": d_air.code,
+                "typed_origin": o_air.typed, "typed_dest": d_air.typed,
+                "resolution_notes": resolution_notes,
                 "beam_width": req.beam_width, "depth_limit": req.depth_limit,
                 "confidence_threshold": req.confidence_threshold,
                 "max_tool_calls": req.max_tool_calls,

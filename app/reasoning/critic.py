@@ -371,14 +371,22 @@ def evaluate(
                 if a.id == b.id or a.id in dominated:
                     continue
                 better = PROVENANCE_RANK[b.provenance] < PROVENANCE_RANK[a.provenance]
-                if better and overlap_fn(a, b) >= DOMINANCE_OVERLAP:
+                if not better:
+                    continue
+                overlap = overlap_fn(a, b)
+                if overlap >= DOMINANCE_OVERLAP:
                     dominated.add(a.id)
                     old = scores[a.id]
+                    # The fraction is recorded, not just the verdict. Three
+                    # hundred of these decisions were logged without it, so
+                    # whether the 0.80 threshold was ever close to the line
+                    # could not be asked at all.
                     scores[a.id] = Score(
                         old.corridor_id, old.total, old.components,
                         Decision.PRUNE_DOMINATED,
-                        f"covers the same airspace as {b.id}, "
-                        f"which has better provenance",
+                        f"covers the same airspace as {b.id} "
+                        f"(overlap {overlap:.3f}), which has better "
+                        f"provenance",
                     )
                     result.pruned.append(scores[a.id])
                     break

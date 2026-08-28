@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120"
+     role="img" aria-label="Turbulence agent">
+  <rect width="120" height="120" rx="18" fill="#0A0E13"/>
+  <g stroke-width="13" fill="none" stroke-linecap="butt">
+    <path d="M28.21 76.90 A36 36 0 0 1 25.39 50.08" stroke="#28FF9A"/>
+    <path d="M26.17 47.69 A36 36 0 0 1 44.22 27.64" stroke="#8FE86B"/>
+    <path d="M46.51 26.62 A36 36 0 0 1 73.49 26.62" stroke="#FFD03A"/>
+    <path d="M75.78 27.64 A36 36 0 0 1 93.83 47.69" stroke="#FF7A45"/>
+    <path d="M94.61 50.08 A36 36 0 0 1 91.79 76.90" stroke="#FF6060"/>
+  </g>
+  <path d="M60 60 L60 32" stroke="#E8EEF4" stroke-width="7"
+        stroke-linecap="round"/>
+  <circle cx="60" cy="60" r="8" fill="#E8EEF4"/>
+</svg>

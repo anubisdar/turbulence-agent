@@ -277,3 +277,67 @@ class TestNoSurvivors:
         cands = [make("bad", endpoints=False)]
         res = evaluate(cands, beam_width=2)
         assert final_reading(res, cands) is Severity.UNRESOLVED
+
+
+class TestDominanceRecordsWhatTriggeredIt:
+    """The rule fired 303 times in production without recording the overlap
+    that caused it. The verdict was logged and the number behind it was
+    computed, used, and thrown away - so whether the 0.80 threshold had
+    ever been near the line could not be asked at all.
+
+    A decision that cannot be second-guessed later is a decision nobody can
+    calibrate.
+    """
+
+    def _dominated(self, overlap):
+        result = evaluate(
+            [make("filed", prov=Provenance.FILED_ROUTE),
+             make("track", prov=Provenance.ACTUAL_TRACK)],
+            beam_width=4, overlap_fn=lambda a, b: overlap)
+        return [s for s in result.pruned
+                if s.decision is Decision.PRUNE_DOMINATED]
+
+    def test_the_reason_carries_the_overlap(self):
+        dominated = self._dominated(0.937)
+        assert dominated, "the better-provenanced corridor should dominate"
+        assert "0.937" in dominated[0].reason
+
+    def test_the_overlap_is_readable_by_the_analyser(self):
+        """The exact pattern the analysis script looks for. Asserting the
+        shape here means a reword cannot silently break the measurement -
+        which is how three hundred decisions went unrecorded."""
+        import re as _re
+
+        dominated = self._dominated(0.812)
+        found = _re.search(r"overlap[^0-9]{0,24}([01]?\.\d+)",
+                           dominated[0].reason, _re.I)
+        assert found and abs(float(found.group(1)) - 0.812) < 1e-6
+
+    def test_a_corridor_below_the_threshold_is_not_dominated(self):
+        assert not self._dominated(0.5)
+
+    def test_the_reason_still_names_the_dominating_corridor(self):
+        """The overlap was added alongside the explanation, not instead of
+        it. A number without the corridor it lost to is not a reason."""
+        assert "track" in self._dominated(0.937)[0].reason
+
+
+def test_the_root_copy_matches_the_installed_one():
+    """This file imports `critic` bare, which resolves to a copy at the
+    repository root rather than to app/reasoning/critic.py. The two were
+    identical by luck until an edit to the real one left the tests reading
+    the old logic and reporting green.
+
+    Rather than rely on remembering, the drift is now a failing test.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    a = (root / "critic.py")
+    b = (root / "app" / "reasoning" / "critic.py")
+    if not a.exists():
+        return                      # nothing to drift from
+    assert a.read_text() == b.read_text(), (
+        "critic.py at the repository root has drifted from "
+        "app/reasoning/critic.py. The tests import the root copy, so they "
+        "would be checking code the application does not run.")

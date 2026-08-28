@@ -420,3 +420,87 @@ class TestNegatedSeveritiesAreNotClaims:
         result = validate(text, self.FACTS)
         assert not result.ok
         assert any("reassurance" in r for r in result.reasons)
+
+
+class TestClauseScopedDenial:
+    """The third and fourth false positive classes, found by reading the
+    rejection log after clearing the database.
+
+    Of four rejections in the current build, all four were the validator
+    being wrong. The measured acceptance rate said 91%; the true rate was
+    100%, and the metric could not tell the difference.
+
+    An earlier fix looked at the four words before a severity word and
+    asked whether an assertion verb appeared there. That rejects "not that
+    the air is calm or smooth", where the negation is six words back and
+    "is" is not. Negation is now scoped to the clause, because a denial
+    governs its own clause and not the one after it.
+    """
+
+    FACTS = {
+        "route": "KCLE to KTPA", "reading": "unresolved",
+        "pilot_reports": {"reading": "unresolved", "count": 0},
+        "forecast": {"reading": "unresolved", "count": 0},
+        "sources_disagree": False, "route_coverage_fraction": 0.1,
+        "corridors_considered": 8, "corridors_kept": 4,
+    }
+
+    @pytest.mark.parametrize("text,word", [
+        # Discarded in production 2026-08-24 17:10:51
+        ("This means there is nothing known about the air on this route, "
+         "not that the air is calm or smooth.", "smooth"),
+        # Discarded in production 2026-08-24 17:11:15
+        ("This lack of data is not the same as the air being calm or the "
+         "ride being smooth.", "smooth"),
+    ])
+    def test_denials_beyond_a_word_window_are_accepted(self, text, word):
+        from app.reasoning.explainer import _negated
+        assert _negated(text.lower(), word) is True
+
+    def test_a_denial_does_not_govern_the_next_clause(self):
+        """The loophole the clause scoping has to keep closed."""
+        from app.reasoning.explainer import _negated
+        assert _negated("nothing is known about this route, and conditions "
+                        "along it are entirely smooth.", "smooth") is False
+
+    def test_a_reassertion_after_a_denial_still_fails(self):
+        from app.reasoning.explainer import _negated
+        assert _negated("the forecast does not say light, it says severe.",
+                        "severe") is False
+
+    def test_an_enumeration_is_not_split_into_clauses(self):
+        """"light, moderate, or severe" splits on its commas into pieces
+        that belong to the phrase governing them."""
+        from app.reasoning.explainer import _clauses
+        clauses = _clauses("there is no basis to characterize conditions "
+                           "as light, moderate, or severe")
+        assert len(clauses) == 1
+
+    def test_reassurance_inside_a_denial_is_accepted(self):
+        """Discarded in production 2026-08-25 13:22:55. The phrase list
+        holds the bare stem "reassur", which matched this project's own
+        idiom for describing an absence."""
+        text = ("For your route from KIAD to KLAX, the assessment is "
+                "unresolved: there are no pilot reports and no forecast "
+                "data covering this flight. Route coverage is very thin at "
+                "about 10 percent. An unresolved reading does not mean the "
+                "air will be calm, and that absence of information should "
+                "not be mistaken for reassurance.")
+        assert validate(text, self.FACTS).ok
+
+    def test_actual_reassurance_still_fails(self):
+        text = ("No forecast covers this route and no pilot has reported "
+                "along it, so you should be fine on this flight today.")
+        result = validate(text, self.FACTS)
+        assert not result.ok
+        assert any("reassurance" in r for r in result.reasons)
+
+    def test_a_phrase_carrying_its_own_negation_is_not_exempt(self):
+        """"nothing to worry about" contains a negation cue. Counting it
+        would let the phrase exempt itself, which broke an existing test
+        the moment clause scoping was added."""
+        text = ("No forecast covers this route, and there is nothing to "
+                "worry about on this flight today at cruise altitude.")
+        result = validate(text, self.FACTS)
+        assert not result.ok
+        assert any("reassurance" in r for r in result.reasons)

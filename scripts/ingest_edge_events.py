@@ -217,8 +217,18 @@ def read_edge_blocks(path: str, since: datetime, cache: dict) -> list[dict]:
                 if not isinstance(when, (int, float)) or when < cutoff:
                     continue
                 status = entry.get("status")
+                # Both the geo filter and the firewall refuse with 403, so
+                # the status alone stopped being enough the moment the
+                # engine moved to blocking. The geo handler appends
+                # blocked_by="geo"; a 403 without it came from the firewall.
                 if status == 403:
-                    detail = "geo filter"
+                    marker = ((entry.get("resp_headers") or {})
+                              .get("blocked_by")
+                              or entry.get("blocked_by") or "")
+                    if isinstance(marker, list):
+                        marker = marker[0] if marker else ""
+                    detail = ("geo filter" if str(marker).lower() == "geo"
+                              else "web application firewall")
                 elif status == 429:
                     detail = "rate limit"
                 else:

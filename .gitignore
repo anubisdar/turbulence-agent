@@ -1,15 +1,64 @@
-.env
-.venv/
-cache/
-__pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-venv/
-data/
+# ---------------------------------------------------------------- secrets
+# Every one of these has held a live credential at some point in this
+# project. Nothing here goes to a public repository.
+*.env
+.env*
+turbulence-agent.env
+*.pem
+*.key
+!**/public*.key
+secrets/
+.secrets
+credentials*
+*_credentials*
+
+# Caddy configuration carries basic-auth hashes and the operator token.
+Caddyfile
+Caddyfile.*
+!Caddyfile.example
+
+# --------------------------------------------------------- licensed data
+# MaxMind GeoLite2 is licensed and may not be redistributed. The NTSB
+# corpus and its embeddings are large and rebuildable from scripts.
+*.mmdb
+GeoLite2-*
+data/*.db
+data/*.sqlite*
+data/ntsb_cache/
+data/embeddings/
+
+# ------------------------------------------------------------ operational
 .drop-backups/
 .checkpoints/
-*.bak
 *.log
-*.key
+logs/
+audit/
+coraza-audit*
+
+# ----------------------------------------------------------------- python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# ------------------------------------------------------------------- node
+node_modules/
+package-lock.json
+
+# -------------------------------------------------------------------- os
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+data/
+*.bak
+.env
 secrets.*

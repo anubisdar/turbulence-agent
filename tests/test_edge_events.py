@@ -221,23 +221,50 @@ class TestIngestReadsRealLogShapes:
         ]
         assert len({e["dedup_key"] for e in module.read_waf(lines, {})}) == 1
 
-    def test_edge_blocks_separate_geo_from_rate_limiting(self, tmp_path):
+    def test_a_403_is_attributed_by_its_marker_not_its_status(self, tmp_path):
+        """Both the geo filter and the firewall refuse with 403, so the
+        status stopped being enough the moment the engine moved to
+        blocking. Before this, four firewall refusals from a US address
+        were reported as blocked by a filter that allows the US.
+
+        The geo handler appends blocked_by="geo"; a 403 without it came
+        from the firewall.
+        """
         import json
 
         module = self._module()
         log = tmp_path / "access.log"
         now = datetime.now(timezone.utc).timestamp()
         log.write_text("\n".join(json.dumps(e) for e in [
+            {"ts": now, "status": 403, "blocked_by": "geo",
+             "request": {"remote_ip": "1.2.3.4", "uri": "/"}},
             {"ts": now, "status": 403,
-             "request": {"remote_ip": "1.2.3.4", "uri": "/"}},
+             "request": {"remote_ip": "1.2.3.5", "uri": "/?q=x"}},
             {"ts": now, "status": 429,
-             "request": {"remote_ip": "1.2.3.4", "uri": "/"}},
+             "request": {"remote_ip": "1.2.3.6", "uri": "/"}},
             {"ts": now, "status": 200,
-             "request": {"remote_ip": "1.2.3.4", "uri": "/"}},
+             "request": {"remote_ip": "1.2.3.7", "uri": "/"}},
         ]) + "\n")
         events = module.read_edge_blocks(
             str(log), datetime.now(timezone.utc) - timedelta(hours=1), {})
-        assert {e["detail"] for e in events} == {"geo filter", "rate limit"}
+        assert {e["detail"] for e in events} == {
+            "geo filter", "web application firewall", "rate limit"}
+
+    def test_the_marker_is_read_from_response_headers_too(self, tmp_path):
+        """Caddy's log_append can surface under resp_headers depending on
+        version, and there it arrives as a list."""
+        import json
+
+        module = self._module()
+        log = tmp_path / "access.log"
+        now = datetime.now(timezone.utc).timestamp()
+        log.write_text(json.dumps(
+            {"ts": now, "status": 403,
+             "resp_headers": {"blocked_by": ["geo"]},
+             "request": {"remote_ip": "1.2.3.4", "uri": "/"}}) + "\n")
+        events = module.read_edge_blocks(
+            str(log), datetime.now(timezone.utc) - timedelta(hours=1), {})
+        assert events[0]["detail"] == "geo filter"
 
     def test_a_missing_access_log_is_not_an_error(self, tmp_path):
         module = self._module()

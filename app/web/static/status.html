@@ -4,20 +4,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Agent status</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjAgMTIwIgogICAgIHJvbGU9ImltZyIgYXJpYS1sYWJlbD0iVHVyYnVsZW5jZSBhZ2VudCI+CiAgPHJlY3Qgd2lkdGg9IjEyMCIgaGVpZ2h0PSIxMjAiIHJ4PSIxOCIgZmlsbD0iIzBBMEUxMyIvPgogIDxnIHN0cm9rZS13aWR0aD0iMTMiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJidXR0Ij4KICAgIDxwYXRoIGQ9Ik0yOC4yMSA3Ni45MCBBMzYgMzYgMCAwIDEgMjUuMzkgNTAuMDgiIHN0cm9rZT0iIzI4RkY5QSIvPgogICAgPHBhdGggZD0iTTI2LjE3IDQ3LjY5IEEzNiAzNiAwIDAgMSA0NC4yMiAyNy42NCIgc3Ryb2tlPSIjOEZFODZCIi8+CiAgICA8cGF0aCBkPSJNNDYuNTEgMjYuNjIgQTM2IDM2IDAgMCAxIDczLjQ5IDI2LjYyIiBzdHJva2U9IiNGRkQwM0EiLz4KICAgIDxwYXRoIGQ9Ik03NS43OCAyNy42NCBBMzYgMzYgMCAwIDEgOTMuODMgNDcuNjkiIHN0cm9rZT0iI0ZGN0E0NSIvPgogICAgPHBhdGggZD0iTTk0LjYxIDUwLjA4IEEzNiAzNiAwIDAgMSA5MS43OSA3Ni45MCIgc3Ryb2tlPSIjRkY2MDYwIi8+CiAgPC9nPgogIDxwYXRoIGQ9Ik02MCA2MCBMNjAgMzIiIHN0cm9rZT0iI0U4RUVGNCIgc3Ryb2tlLXdpZHRoPSI3IgogICAgICAgIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgogIDxjaXJjbGUgY3g9IjYwIiBjeT0iNjAiIHI9IjgiIGZpbGw9IiNFOEVFRjQiLz4KPC9zdmc+Cg==">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root[data-theme="dark"]{
   --bg:#070C12; --panel:#0E151E; --raised:#18232F; --rule:#2A3A4A;
-  --ink:#F0F5F9; --mid:#B3C2CE; --dim:#7E90A0;
-  --live:#4CC9F0; --caution:#FFC061; --good:#5DCAA5; --model:#A78BFA;
+  --ink:#F0F5F9; --mid:#B3C2CE; --dim:#8A9CAC;
+  --live:#43D2FF; --caution:#FF5A5A; --good:#28FF9A; --model:#B98CFF;
+  --note:#FFB020;
   --neutral:#5C6C7A;
 }
 :root[data-theme="light"]{
   --bg:#EEF2F6; --panel:#FFFFFF; --raised:#F3F6F9; --rule:#CFD9E2;
   --ink:#111C26; --mid:#3C4C5A; --dim:#61717F;
-  --live:#0E7FA8; --caution:#9A6100; --good:#0F6E56; --model:#5B47B8;
+  --live:#0E7FA8; --caution:#C0261F; --good:#0F6E56; --model:#5B47B8;
+  --note:#8A5300;
   --neutral:#8B9AA6;
 }
 *{box-sizing:border-box}
@@ -25,6 +28,8 @@ body{
   margin:0; background:var(--bg); color:var(--ink);
   font:15px/1.55 "IBM Plex Sans",system-ui,sans-serif;
 }
+header .mark{align-self:center; margin-bottom:-2px; flex:none;
+  display:block}
 header{
   display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
   padding:16px 22px; background:var(--panel);
@@ -63,6 +68,18 @@ main{padding:22px; max-width:1180px; margin:0 auto}
 .cols .rows{column-count:3; column-gap:34px}
 .waf-cols{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:26px}
 @media (max-width:760px){ .waf-cols{grid-template-columns:1fr} }
+.ok-note{
+  padding:10px 12px; font-size:13px; line-height:1.6; color:var(--dim);
+  border-left:2px solid var(--accent); background:var(--panel-2);
+}
+table.slice{width:100%; border-collapse:collapse; font-size:13px}
+table.slice th{
+  text-align:left; font:11px/1 "IBM Plex Mono",monospace;
+  letter-spacing:.1em; text-transform:uppercase; color:var(--dim);
+  padding:0 10px 8px 0; font-weight:400;
+}
+table.slice td{padding:7px 10px 7px 0; border-top:1px solid var(--line)}
+table.slice .n{text-align:right; font-family:"IBM Plex Mono",monospace}
 .col-head{
   font:11px/1 "IBM Plex Mono",monospace; letter-spacing:.12em;
   text-transform:uppercase; color:var(--dim); margin-bottom:8px;
@@ -73,22 +90,26 @@ main{padding:22px; max-width:1180px; margin:0 auto}
 .row:last-child{border-bottom:0}
 .row span{color:var(--mid); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 .row b{font:12.5px/1.4 "IBM Plex Mono",monospace; font-weight:500; color:var(--ink)}
+.row b.caution, .big b.caution{color:var(--caution)}
 .big{display:flex; align-items:baseline; gap:9px; margin-bottom:10px}
 .big b{font-size:26px; font-weight:600}
 .big span{font-size:12.5px; color:var(--dim)}
 .aside{
   margin-top:13px; padding:9px 11px; background:var(--raised);
-  border-left:2px solid var(--neutral); font-size:12.5px; color:var(--mid); line-height:1.55;
+  border-left:2px solid var(--note); font-size:12.5px; color:var(--note); line-height:1.55;
 }
 .aside.accent{border-left-color:var(--live)}
 .empty{padding:30px 0; text-align:center; color:var(--dim); font-size:13px}
 footer{padding:6px 22px 26px; max-width:1180px; margin:0 auto; font-size:12px; color:var(--dim)}
 footer a{color:var(--live)}
+footer .owner{float:right}
+@media (max-width:700px){footer .owner{float:none; display:block; margin-top:6px}}
 </style>
 </head>
 <body>
 
 <header>
+  <svg class="mark" width="28" height="28" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" aria-hidden="true" focusable="false" role="img" aria-labelledby="mark-title mark-desc"> <title id="mark-title">Turbulence agent</title> <desc id="mark-desc">A panel instrument whose scale runs from smooth through to extreme turbulence.</desc> <rect x="4" y="4" width="112" height="112" rx="14" fill="#151A21"/> <rect x="4" y="4" width="112" height="112" rx="14" fill="none" stroke="#2E3944" stroke-width="1.5"/> <g fill="#3A4652"> <circle cx="15" cy="15" r="3"/><circle cx="105" cy="15" r="3"/> <circle cx="15" cy="105" r="3"/><circle cx="105" cy="105" r="3"/> </g> <circle cx="60" cy="60" r="49" fill="#232B34"/> <circle cx="60" cy="60" r="46" fill="#161C23"/> <circle cx="60" cy="60" r="43" fill="#0A0E13"/> <circle cx="60" cy="60" r="43" fill="none" stroke="#39444F" stroke-width="1"/> <g stroke-width="8" fill="none" stroke-linecap="butt"> <path d="M28.21 76.90 A36 36 0 0 1 25.39 50.08" stroke="var(--m-smooth, #28FF9A)"/> <path d="M26.17 47.69 A36 36 0 0 1 44.22 27.64" stroke="var(--m-light, #8FE86B)"/> <path d="M46.51 26.62 A36 36 0 0 1 73.49 26.62" stroke="var(--m-moderate, #FFD03A)"/> <path d="M75.78 27.64 A36 36 0 0 1 93.83 47.69" stroke="var(--m-severe, #FF7A45)"/> <path d="M94.61 50.08 A36 36 0 0 1 91.79 76.90" stroke="var(--m-extreme, #FF6060)"/> </g> <g stroke="#8899A8" stroke-width="1.5" stroke-linecap="round"> <path d="M33.15 75.50 L22.76 81.50"/> <path d="M30.52 50.42 L19.10 46.71"/> <path d="M47.39 31.68 L42.51 20.72"/> <path d="M72.61 31.68 L77.49 20.72"/> <path d="M89.48 50.42 L100.90 46.71"/> <path d="M86.85 75.50 L97.24 81.50"/> </g> <circle cx="60" cy="60" r="21" fill="none" stroke="#1D242C" stroke-width="1"/> <path d="M60 60 L60 33" stroke="#E8EEF4" stroke-width="3" stroke-linecap="round"/> <circle cx="60" cy="60" r="5" fill="#E8EEF4"/> <circle cx="60" cy="60" r="2" fill="#0A0E13"/> </svg> 
   <h1>Agent status</h1>
   <span class="sub" id="window">last 30 days</span>
   <span class="spacer"></span>
@@ -105,6 +126,7 @@ footer a{color:var(--live)}
 
 <footer>
   <span id="foot"></span> &middot; <a href="/">back to the agent</a>
+  <span class="owner">&copy; 2026 Adept Security LLC</span>
 </footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
@@ -133,10 +155,11 @@ try {
   $('t-light').setAttribute('aria-pressed', saved === 'light');
 } catch (e) {}
 
-function rows(items, label, value, emptyText){
+function rows(items, label, value, emptyText, tone){
   if (!items || !items.length) return `<div class="empty">${esc(emptyText)}</div>`;
+  const cls = tone ? ` class="${tone}"` : '';
   return '<div class="rows">' + items.map(i =>
-    `<div class="row"><span>${esc(label(i))}</span><b>${esc(value(i))}</b></div>`
+    `<div class="row"><span>${esc(label(i))}</span><b${cls}>${esc(value(i))}</b></div>`
   ).join('') + '</div>';
 }
 
@@ -176,7 +199,7 @@ function render(d){
       <div class="card"><span>API calls</span><b>${n(t.api_calls)}</b></div>
       <div class="card"><span>Median</span><b>${(d.median_seconds || 0).toFixed(1)}s</b></div>
       <div class="card"><span>Degraded</span><b>${n(t.degraded)}</b>
-        <em>a source failed</em></div>
+        <em>a source failed (pilot reports, forecast)</em></div>
     </div>
 
     <div class="panel" style="margin-bottom:16px">
@@ -239,29 +262,91 @@ function render(d){
 
     <div class="grid g2">
       <div class="panel">
-        <h2>Explanations the guardrail caught</h2>
+        <h2>Model paragraphs the agent's validator discarded</h2>
         <p class="note">rejected rather than repaired, and the plain summary shown instead</p>
         ${rows(d.rejections, r => r.reason, r => r.n,
-               'Nothing rejected in this window.')}
+               'Nothing rejected in this window.', 'caution')}
       </div>
       <div class="panel">
         <h2>Degraded searches</h2>
         <p class="note">a data source failed, so fewer corridors were built</p>
         ${rows(d.degraded, r => r.reason, r => r.n,
-               'No source failures in this window.')}
+               'No source failures in this window.', 'caution')}
       </div>
     </div>
 
-    <div class="grid g2">
+    <div class="panel" style="margin-bottom:16px">
+      <h2>Behavior by kind of search</h2>
+      <p class="note">the same metrics split by what the search actually
+        met, because an average across all of them hides where a problem
+        lives</p>
+      ${(d.by_outcome || []).length
+        ? `<table class="slice">
+             <tr>
+               <th>what the search met</th>
+               <th class="n">searches</th>
+               <th class="n">explained</th>
+               <th class="n">accepted</th>
+               <th class="n">seconds</th>
+               <th class="n">calls</th>
+             </tr>
+             ${d.by_outcome.map(r => `<tr>
+               <td>${esc(r.slice)}</td>
+               <td class="n">${n(r.searches)}</td>
+               <td class="n">${n(r.explained || 0)}</td>
+               <td class="n">${r.acceptance === null ? '-'
+                    : `${Math.round(r.acceptance * 100)}%`}</td>
+               <td class="n">${r.median_seconds ?? '-'}</td>
+               <td class="n">${r.mean_calls ?? '-'}</td>
+             </tr>`).join('')}
+           </table>
+           <div class="aside">The explainer&rsquo;s acceptance rate was 91%
+             overall while every rejection sat on unresolved routes, and
+             every one of those turned out to be the validator being wrong.
+             A single number could not show that.</div>`
+        : `<div class="empty">No searches recorded in this window.</div>`}
+    </div>
+
+    <div class="grid g3">
       <div class="panel">
-        <h2>The challenge</h2>
-        <p class="note">how each search got past it, and what it turned away</p>
+        <h2>Prompt injection monitoring</h2>
+        <p class="note">at model ingress &middot; every field checked against
+          its expected shape before the prompt is sent</p>
+        ${!(d.fact_problems || {}).searches
+          ? `<div class="ok-note">Every fact matched its shape on every
+             search in this window.</div>`
+          : `<div class="big">
+               <b class="caution">${n(d.fact_problems.problems)}</b>
+               <span>problem${d.fact_problems.problems === 1 ? '' : 's'}
+                 across <b>${n(d.fact_problems.searches)}</b>
+                 search${d.fact_problems.searches === 1 ? '' : 'es'}</span>
+             </div>
+             <div class="aside accent">A field outside its shape means a
+               data provider sent something unexpected, or something tried
+               to reach the model through one of the two fields this system
+               does not compute. Read them with
+               <code>journalctl -t turbulence-agent | grep "fact shape"</code>.
+               </div>`}
+        <div class="aside">Eleven of the twelve fields are computed here
+          and cannot carry text. The two that can - the aircraft
+          variant, passed through from the flight data provider, and the
+          plain summary - are the fields being monitored for
+          manipulation.</div>
+      </div>
+
+      <div class="panel">
+        <h2>Proving a person asked</h2>
+        <p class="note">a CAPTCHA guards every search, because each one spends
+          against a metered flight API &middot; how each got past it, and what
+          it turned away</p>
         ${(d.challenges || []).some(c => c.outcome !== 'not_required'
                                       && c.outcome !== 'not recorded')
           ? rows(d.challenges,
-                 r => ({session: 'existing session',
-                        solved: 'solved the challenge',
-                        not_required: 'challenge not enabled',
+                 r => ({session: 'already solved, within the session',
+                        solved: 'solved the CAPTCHA',
+                        operator: 'operator token (scripts)',
+                        local: 'from the instance itself',
+                        not_required: 'CAPTCHA was switched off',
                         'not recorded': 'before this was recorded'
                        }[r.outcome] || r.outcome),
                  r => r.n, '')
@@ -302,8 +387,8 @@ function render(d){
 
     <div class="panel" style="margin-bottom:16px">
       <h2>Web application firewall</h2>
-      <p class="note">detection only &middot; every one of these was allowed
-        through to the application</p>
+      <p class="note">blocking &middot; every one of these was refused at the
+        edge and never reached the application</p>
       ${d.edge_note
         ? `<div class="empty">${esc(d.edge_note)}</div>`
         : !(d.waf || {}).detections
@@ -333,29 +418,28 @@ function render(d){
         </div>
         <div class="aside accent"><b>${n(d.waf.would_block)}</b> of these
           scored 5 or more, which is where the rule set refuses a request.
-          Those are what would be turned away if the engine moved from
-          detection to blocking.</div>
+          Blocking since 27 August, after five days of detection logs showed
+          no rule matching a real search.</div>
         <div class="aside">The firewall runs before the geo filter, so it
-          sees traffic no other panel does &mdash; including requests
+          sees traffic no other panel does - including requests
           rejected a moment later for being outside the US. Counted per
           request: one request tripping four rules is one detection.</div>`}
     </div>
 
     <div class="panel">
       <h2>Blocked at the edge</h2>
-      <p class="note">stopped by the GeoIP filter or the rate limit, so they
-        never reached the application</p>
+      <p class="note">stopped by the GeoIP filter, the rate limit or the
+        firewall, so they never reached the application</p>
       ${d.edge_note
         ? `<div class="empty">${esc(d.edge_note)}</div>`
         : `
           <div class="big">
             <b>${n((d.blocked || []).reduce((t, r) => t + r.n, 0))}</b>
-            <span>${(d.blocked || []).length > 1
-              ? (d.blocked || []).map(r =>
-                  `${r.n} ${esc(r.label)}`).join(' &middot; ')
-              : ((d.blocked || [])[0]
-                  ? `blocked by the ${esc(d.blocked[0].label)}`
-                  : 'blocked')}</span>
+            <span>blocked by the geo filter, rate limit or firewall${
+              (d.blocked || []).length
+                ? ' &middot; ' + d.blocked.map(r =>
+                    `${r.n} ${esc(r.label)}`).join(' &middot; ')
+                : ''}</span>
           </div>
           <div class="cols">
             ${rows(d.blocked_countries, r => r.label, r => r.n,
