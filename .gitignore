@@ -62,3 +62,4 @@ data/
 *.bak
 .env
 secrets.*
+.claude/
