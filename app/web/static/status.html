@@ -13,14 +13,14 @@
   --bg:#070C12; --panel:#0E151E; --raised:#18232F; --rule:#2A3A4A;
   --ink:#F0F5F9; --mid:#B3C2CE; --dim:#8A9CAC;
   --live:#43D2FF; --caution:#FF5A5A; --good:#28FF9A; --model:#B98CFF;
-  --note:#FFB020;
+  --note:#43D2FF;
   --neutral:#5C6C7A;
 }
 :root[data-theme="light"]{
   --bg:#EEF2F6; --panel:#FFFFFF; --raised:#F3F6F9; --rule:#CFD9E2;
   --ink:#111C26; --mid:#3C4C5A; --dim:#61717F;
   --live:#0E7FA8; --caution:#C0261F; --good:#0F6E56; --model:#5B47B8;
-  --note:#8A5300;
+  --note:#0C6A91;
   --neutral:#8B9AA6;
 }
 *{box-sizing:border-box}
@@ -72,7 +72,13 @@ main{padding:22px; max-width:1180px; margin:0 auto}
   padding:10px 12px; font-size:13px; line-height:1.6; color:var(--dim);
   border-left:2px solid var(--accent); background:var(--panel-2);
 }
-table.slice{width:100%; border-collapse:collapse; font-size:13px}
+table.slice{width:100%; border-collapse:collapse; font-size:13px;
+  min-width:380px}
+.slice-scroll{overflow-x:auto; scrollbar-width:thin}
+@media(max-width:560px){
+  .cols .rows{column-count:1}
+  .grid.g2,.grid.g3{grid-template-columns:minmax(0,1fr)}
+}
 table.slice th{
   text-align:left; font:11px/1 "IBM Plex Mono",monospace;
   letter-spacing:.1em; text-transform:uppercase; color:var(--dim);
@@ -96,7 +102,7 @@ table.slice .n{text-align:right; font-family:"IBM Plex Mono",monospace}
 .big span{font-size:12.5px; color:var(--dim)}
 .aside{
   margin-top:13px; padding:9px 11px; background:var(--raised);
-  border-left:2px solid var(--note); font-size:12.5px; color:var(--note); line-height:1.55;
+  border-left:2px solid var(--rule); font-size:12.5px; color:var(--note); line-height:1.55;
 }
 .aside.accent{border-left-color:var(--live)}
 .empty{padding:30px 0; text-align:center; color:var(--dim); font-size:13px}
@@ -284,7 +290,7 @@ function render(d){
         met, because an average across all of them hides where a problem
         lives</p>
       ${(d.by_outcome || []).length
-        ? `<table class="slice">
+        ? `<div class="slice-scroll"><table class="slice">
              <tr>
                <th>what the search met</th>
                <th class="n">searches</th>
@@ -302,7 +308,7 @@ function render(d){
                <td class="n">${r.median_seconds ?? '-'}</td>
                <td class="n">${r.mean_calls ?? '-'}</td>
              </tr>`).join('')}
-           </table>
+           </table></div>
            <div class="aside">A search that found nothing, a search whose
              sources disagreed, and a search that lost a source are three
              different questions. An average across all of them answers

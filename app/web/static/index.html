@@ -95,7 +95,8 @@ h1,h2,h3{font-family:var(--fd);font-weight:600;margin:0;letter-spacing:.01em}
 button,input,select{font:inherit;color:inherit}
 
 /* ---------------------------------------------------------- shell */
-.shell{display:grid;grid-template-rows:auto 1fr;height:100vh}
+.shell{display:grid;grid-template-rows:auto 1fr;
+  grid-template-columns:minmax(0,1fr);height:100vh}
 
 .masthead{
   display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;
@@ -116,10 +117,24 @@ button,input,select{font:inherit;color:inherit}
 .themer button:hover{color:var(--ink)}
 .themer button[aria-pressed=true]{background:var(--live);color:var(--on-live)}
 
-.body{display:grid;grid-template-columns:340px 1fr;min-height:0}
+.body{display:grid;grid-template-columns:340px minmax(0,1fr);
+  min-height:0;min-width:0}
 @media(max-width:900px){
-  .body{grid-template-columns:1fr;grid-template-rows:auto 1fr}
+  .body{grid-template-columns:minmax(0,1fr);
+    grid-template-rows:auto 1fr}
+  .rail{min-width:0}
   #map{min-height:44vh}
+}
+@media(max-width:560px){
+  /* Tighter tabs so more of the strip is visible before it scrolls. */
+  .tab{padding:9px 10px;letter-spacing:.06em}
+  .drawer,#map,.pane{min-width:0}
+  /* A fixed label column has nowhere to go on a phone; the role stacks
+     above its text instead. */
+  .beat{grid-template-columns:1fr;gap:4px}
+  .stats{grid-template-columns:1fr 1fr}
+  .masthead{padding:12px 14px;gap:10px}
+  .block{padding:14px}
 }
 
 /* ---------------------------------------------------------- controls */
@@ -133,12 +148,14 @@ button,input,select{font:inherit;color:inherit}
   text-transform:uppercase;color:var(--dim);margin-bottom:10px;
 }
 .pair{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.pair>label{min-width:0}
 label{display:block}
 label span{
   display:block;font-family:var(--fm);font-size:10px;letter-spacing:.1em;
   text-transform:uppercase;color:var(--muted);margin-bottom:4px;
 }
-input[type=text],input[type=number]{
+input[type=text],input[type=number],
+input[type=date],input[type=time]{
   width:100%;background:var(--raised);border:1px solid var(--rule);
   padding:8px 10px;font-family:var(--fm);font-size:14px;border-radius:0;
 }
@@ -331,7 +348,12 @@ body{transition:background .18s,color .18s}
   background:var(--panel);border-top:1px solid var(--rule);
   display:flex;flex-direction:column;max-height:38vh;
 }
-.tabs{display:flex;gap:0;border-bottom:1px solid var(--rule)}
+.tabs{
+  display:flex;gap:0;border-bottom:1px solid var(--rule);
+  overflow-x:auto;scrollbar-width:none;min-width:0;
+}
+.tabs::-webkit-scrollbar{display:none}
+.tab{flex:0 0 auto}
 .tab{
   background:none;border:0;border-bottom:2px solid transparent;cursor:pointer;
   padding:9px 16px;color:var(--muted);
@@ -489,7 +511,7 @@ pre .p{color:var(--dead)}
           <summary>Search settings</summary>
           <div class="pair">
             <label><span>Beam width</span><input type="number" id="beam" value="2" min="1" max="6"></label>
-            <label><span>Depth</span><input type="number" id="depth" value="2" min="1" max="4"></label>
+            <label><span>Depth</span><input type="number" id="depth" value="2" min="1" max="2"></label>
             <label><span>Call cap</span><input type="number" id="calls" value="12" min="1" max="40"></label>
             <label><span>Width nm</span><input type="number" id="width" value="25" min="5" max="150"></label>
           </div>

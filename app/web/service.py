@@ -49,7 +49,8 @@ from app.runs import (
     resolve_origin,
 )
 from app.retrieval.airports import Airport, resolve_pair
-from app.reasoning.controller import Budget, SearchResult, search
+from app.reasoning.controller import (MAX_IMPLEMENTED_DEPTH, Budget,
+                                      SearchResult, search)
 from app.reasoning.critic import Corridor
 from app.reasoning.generator import CorridorGenerator
 from app.reasoning.geometry import (
@@ -489,6 +490,20 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
     # Fliers know IATA codes; the provider speaks ICAO. Resolving here
     # rather than at the edge means the API and the page get the same
     # treatment, and a guess is carried forward as a guess.
+    # The form caps this at two, but the API takes the same field and a
+    # caller can ask for more. A depth beyond what the generator
+    # implements produces no candidates and stops - a search that looks
+    # deeper and is not. Clamping and saying so is better than silently
+    # running a pass that does nothing.
+    depth_note = None
+    if req.depth_limit > MAX_IMPLEMENTED_DEPTH:
+        depth_note = (
+            f"Depth {req.depth_limit} was requested; the generator "
+            f"implements {MAX_IMPLEMENTED_DEPTH} levels, so the search ran "
+            f"to {MAX_IMPLEMENTED_DEPTH}. A third level is designed and not "
+            f"built.")
+        req = replace(req, depth_limit=MAX_IMPLEMENTED_DEPTH)
+
     o_air, d_air = resolve_pair(req.origin, req.dest)
     if o_air is None:
         raise ServiceError(
@@ -500,6 +515,8 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
             f"three-letter code like LAX or a four-letter one like KLAX.")
 
     resolution_notes = [n for n in (o_air.note(), d_air.note()) if n]
+    if depth_note:
+        resolution_notes.append(depth_note)
 
     # Compared after resolution, so BOS and KBOS are caught as the same
     # airport rather than treated as a route.
@@ -516,16 +533,17 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
     existing = current_request_id()
     if existing and existing != "-":
         return _run_corridor_search(resolved, api_key, db_path, existing,
-                                    o_air, d_air)
+                                    o_air, d_air, depth_note)
     with request_context() as request_id:
         return _run_corridor_search(resolved, api_key, db_path, request_id,
-                                    o_air, d_air)
+                                    o_air, d_air, depth_note)
 
 
 def _run_corridor_search(req: SearchRequest, api_key: str | None,
                          db_path: str, request_id: str,
                          o_air: Airport | None = None,
-                         d_air: Airport | None = None) -> dict[str, Any]:
+                         d_air: Airport | None = None,
+                         depth_note: str | None = None) -> dict[str, Any]:
     # Callers that resolved already pass the airports through; the rest
     # get codes treated as typed, which is what they were before.
     if o_air is None:
@@ -535,6 +553,8 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
         d_air = Airport(code=req.dest.upper(), how="exact",
                         typed=req.dest.upper())
     resolution_notes = [n for n in (o_air.note(), d_air.note()) if n]
+    if depth_note:
+        resolution_notes.append(depth_note)
     timings = Timings()
     log.info("search started " + kv(
         **trip_fields(o_air.code, d_air.code,
