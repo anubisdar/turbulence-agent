@@ -106,10 +106,14 @@ table.slice .n{text-align:right; font-family:"IBM Plex Mono",monospace}
 }
 .aside.accent{border-left-color:var(--live)}
 .empty{padding:30px 0; text-align:center; color:var(--dim); font-size:13px}
-footer{padding:6px 22px 26px; max-width:1180px; margin:0 auto; font-size:12px; color:var(--dim)}
+footer{
+  padding:6px 22px 26px; max-width:1180px; margin:0 auto;
+  font-size:12px; color:var(--dim);
+  display:flex; gap:8px; flex-wrap:wrap; align-items:baseline;
+}
 footer a{color:var(--live)}
-footer .owner{float:right}
-@media (max-width:700px){footer .owner{float:none; display:block; margin-top:6px}}
+footer .owner{margin-left:auto}
+@media (max-width:700px){footer .owner{margin-left:0}}
 </style>
 </head>
 <body>
@@ -132,6 +136,7 @@ footer .owner{float:right}
 
 <footer>
   <span id="foot"></span> &middot; <a href="/">back to the agent</a>
+  &middot; <a href="https://github.com/anubisdar/turbulence-agent" target="_blank" rel="noopener noreferrer">source</a>
   <span class="owner">&copy; 2026 Adept Security LLC</span>
 </footer>
 

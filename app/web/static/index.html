@@ -207,8 +207,9 @@ body{transition:background .18s,color .18s}
 .verdict.r-extreme,  .dbg.r-extreme{--reading:var(--r-extreme)}
 .siteline{
   padding:8px 18px 20px;font-size:12px;color:var(--dim);
-  display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  display:flex;gap:14px;flex-wrap:wrap;align-items:baseline;
 }
+.siteline .owner{margin-left:auto}
 .siteline a{color:var(--live);text-decoration:none}
 .siteline a:hover{text-decoration:underline}
 
@@ -556,6 +557,7 @@ pre .p{color:var(--dead)}
   </div>
   <footer class="siteline">
     <a href="/status">agent status</a>
+    <a href="https://github.com/anubisdar/turbulence-agent" target="_blank" rel="noopener noreferrer">source</a>
     <span class="owner">&copy; 2026 Adept Security LLC</span>
   </footer>
 </div>
