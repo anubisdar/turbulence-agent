@@ -162,6 +162,10 @@ input[type=date],input[type=time]{
 input:focus-visible,button:focus-visible,.row:focus-visible,.tab:focus-visible{
   outline:2px solid var(--live);outline-offset:2px;
 }
+.horizon{
+  margin-top:9px;font-size:11.5px;line-height:1.55;color:var(--muted);
+}
+.horizon.beyond{color:var(--r-moderate)}
 .toggles{display:flex;flex-direction:column;gap:8px;margin-top:12px}
 .toggle{display:flex;align-items:center;gap:9px;cursor:pointer;color:var(--muted)}
 .toggle input{accent-color:var(--live);width:15px;height:15px}
@@ -245,6 +249,10 @@ body{transition:background .18s,color .18s}
   white-space:pre-wrap;word-break:break-word;
 }
 .dbg-facts b{color:var(--ink);font-weight:500}
+.fx{display:inline-block;width:15px}
+.fx.ok{color:var(--r-smooth)}
+.fx.bad{color:var(--caution)}
+.fx-why{color:var(--caution)}
 .dbg-text{
   background:var(--raised);padding:11px 13px;font-size:13px;
   line-height:1.55;border-left:2px solid var(--rule);
@@ -351,11 +359,12 @@ body{transition:background .18s,color .18s}
 }
 .tabs{
   display:flex;gap:0;border-bottom:1px solid var(--rule);
-  overflow-x:auto;scrollbar-width:none;min-width:0;
+  overflow-x:auto;overflow-y:hidden;scrollbar-width:none;
+  min-width:0;flex:0 0 auto;
 }
 .tabs::-webkit-scrollbar{display:none}
-.tab{flex:0 0 auto}
 .tab{
+  flex:0 0 auto;
   background:none;border:0;border-bottom:2px solid transparent;cursor:pointer;
   padding:9px 16px;color:var(--muted);
   font-family:var(--fm);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
@@ -487,6 +496,9 @@ pre .p{color:var(--dead)}
           <label><span>Date</span><input type="date" id="date"></label>
           <label><span>Time (UTC)</span><input type="time" id="time" value="13:00"></label>
         </div>
+        <div class="horizon" id="horizon">Turbulence forecasts and pilot
+          reports reach about six hours ahead. A departure beyond that is
+          answered about the air now, and usually reads unresolved.</div>
         <div class="toggles">
           <label class="toggle"><input type="checkbox" id="turbulence" checked>
             Look up turbulence along the route</label>
@@ -939,10 +951,25 @@ function renderLlmDebug(data){
   const seen = new Set(order);
   const keys = order.filter(k => k in facts)
                     .concat(Object.keys(facts).filter(k => !seen.has(k)));
+  // A problem names its field first, so the field can be matched from
+  // the message without the server sending a second structure.
+  const problemFor = {};
+  shapes.forEach(text => {
+    const field = String(text).split(/[ .(]/)[0];
+    (problemFor[field] = problemFor[field] || []).push(text);
+  });
+
   const factLines = keys.map(k => {
     const v = facts[k];
     const shown = (v && typeof v === 'object') ? JSON.stringify(v) : String(v);
-    return `<b>${esc(k)}</b>  ${esc(shown)}`;
+    const bad = problemFor[k];
+    const mark = bad
+      ? '<span class="fx bad">\u2715</span>'
+      : '<span class="fx ok">\u2713</span>';
+    const why = bad
+      ? bad.map(t => `\n     <span class="fx-why">${esc(t)}</span>`).join('')
+      : '';
+    return `${mark}<b>${esc(k)}</b>  ${esc(shown)}${why}`;
   }).join('\n');
 
   const verdict = kept
@@ -968,10 +995,11 @@ function renderLlmDebug(data){
     </div>`;
 
   const shapeBlock = shapes.length ? `
-    <div class="dbg-section">
-      <div class="dbg-label">facts that failed their shape check</div>
-      <div class="dbg-reason">${shapes.map(x => esc(x)).join('<br>')}</div>
-    </div>` : '';
+    <div class="dbg-why" style="color:var(--caution)">${shapes.length} fact${
+      shapes.length > 1 ? 's' : ''} failed a shape check, marked above. The
+      prompt was sent anyway: the reading was produced before the model was
+      called, and refusing to explain a search because a provider sent an odd
+      string would be the worse failure.</div>` : '';
 
   // The rules come before the facts, because that is the order they are
   // sent and the order they need reading: what the model was told it may
@@ -996,7 +1024,8 @@ function renderLlmDebug(data){
     ${rulesBlock}
 
     <div class="dbg-section">
-      <div class="dbg-label">the facts it was given</div>
+      <div class="dbg-label">the facts it was given${
+        shapes.length ? ', and their shape checks' : ''}</div>
       <div class="dbg-facts">${factLines || 'no facts recorded'}</div>
     </div>
 
@@ -1122,6 +1151,42 @@ if(!(() => { try{ return localStorage.getItem('corridor-theme'); }catch(e){ retu
 applyTheme(startTheme, false);
 
 $('date').value = new Date().toISOString().slice(0,10);
+
+//: Six, matching FORECAST_HORIZON_HOURS in service.py. The agent already
+//: says this at the end of a search; saying it before one is cheaper for
+//: the reader and for the metered API.
+const HORIZON_HOURS = 6;
+const HORIZON_DEFAULT = 'Turbulence forecasts and pilot reports reach about '
+  + 'six hours ahead. A departure beyond that is answered about the air now, '
+  + 'and usually reads unresolved.';
+
+function updateHorizon(){
+  const note = $('horizon');
+  if(!note) return;
+  const d = $('date').value, t = $('time').value;
+  const when = (d && t) ? new Date(`${d}T${t}:00Z`) : null;
+  if(!when || isNaN(when)){
+    note.classList.remove('beyond');
+    note.textContent = HORIZON_DEFAULT;
+    return;
+  }
+  const ahead = (when - new Date()) / 3600000;
+  if(ahead > HORIZON_HOURS){
+    // The wording changes rather than a second warning appearing, so the
+    // reader is not told the same thing twice.
+    note.classList.add('beyond');
+    note.textContent = `That departure is about ${Math.round(ahead)} hours `
+      + `away and forecasts reach about ${HORIZON_HOURS} hours. The reading `
+      + `will describe the air on this route now, not at departure, and `
+      + `will usually be unresolved.`;
+  } else {
+    note.classList.remove('beyond');
+    note.textContent = HORIZON_DEFAULT;
+  }
+}
+
+['date','time'].forEach(id => $(id).addEventListener('input', updateHorizon));
+updateHorizon();
 
 $('go').addEventListener('click', run);
 ['origin','dest'].forEach(id => $(id).addEventListener('keydown',
