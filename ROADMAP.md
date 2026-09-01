@@ -1,6 +1,6 @@
 # Roadmap
 
-This started as a graduate capstone and is maintained by one person. What
+This started as an executive education program capstone and is maintained by one person. What
 follows is what I intend to work on and what I know is missing, not a
 schedule. Nothing here carries a date.
 
