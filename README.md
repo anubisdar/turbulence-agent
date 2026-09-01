@@ -10,7 +10,7 @@ Live: **[turbulence.adeptsecurity.net](https://turbulence.adeptsecurity.net)**
 ## The problem
 
 I'm an anxious flier. All I want to know before a flight is whether it's
-going to be bumpy.
+going to be bumpy and I typically like to know if I'm flying on a Max. 
 
 All the inputs to that question are public and free:
 
@@ -31,11 +31,11 @@ built to give that answer.
 A nervous flier who's technical enough to want to see the reasoning. Not a
 dispatcher. That choice permeates the design: the system reports rather than
 recommends, and takes the worse of two disagreeing readings because a
-passenger and a dispatcher would have opposite defaults.
+passenger and a dispatcher would have opposite defaults. 
 
 ---
 
-## The one rule the system follows
+## The one rule to rule them all
 
 > **Absence of data is never smooth air.**
 
@@ -58,7 +58,7 @@ Every other design choice follows from that first one:
 
 ## Architecture
 
-Six roles. Two are language models, and both are at the edges. Everything
+Six roles. Two are language models, and both are at the systen edges. Everything
 that decides anything is deterministic Python.
 
 One of those two language models is specified but not implemented - a form
