@@ -4,82 +4,20 @@ This started as a graduate capstone and is maintained by one person. What
 follows is what I intend to work on and what I know is missing, not a
 schedule. Nothing here carries a date.
 
-The ordering principle is the same one the system uses: things that make
-the project's own claims more accurate come before things that make it
-do more.
-
----
-
-## Known gaps
-
-These are places where the code is currently less good than the README
-implies. They are listed first because that is the order I plan to fix
-them in.
-
-### The output validator has a fifth false-positive class
-
-The README describes four classes of accurate paragraph wrongly discarded
-by the explainer's validator. There is a fifth, found in production on
-31 August 2026, and it is the same construction as the first:
-
-> when sources disagree, the more severe reading is used rather than an
-> average
-
-That is a comparative describing the conflict rule, not an FAA severity
-level. The clause-scoping fix that resolved the earlier cases handled the
-phrasings that existed rather than the pattern behind them.
-
-The interesting part is that it appeared *after* the fix, from the model
-correctly restating the project's own policy. A guardrail firing and a
-guardrail being right stay different facts even once you have repaired it
-once.
-
-**Planned:** extend the comparative exemption to cover a severity word
-used adjectivally on `reading`, `source` or `value`, add the sentence as
-a regression test, and correct the count in the README.
-
-### Part of the test suite reaches the network
-
-`tests/conftest.py` blocks live calls by patching httpx transports.
-`app/sources/aeroapi.py`, `app/sources/gairmet.py` and
-`app/web/turnstile.py` use `urllib.request.urlopen` directly, so tests
-touching those paths are not covered by the guard.
-
-Measured: the same test passed four times and failed once in five
-consecutive runs, with `URLError: [Errno 104] Connection reset by peer`.
-Arming a `urllib` guard turns two intermittent failures into sixty-two
-deterministic ones, because those sixty-two genuinely depend on the
-calls.
-
-**Planned:** record fixtures for the three paths, then arm the guard.
-Until that lands, the reported pass count is conditional on network
-conditions - which is a weaker claim than it reads as.
-
-### The API and the service disagree on four defaults
-
-`CorridorSearchBody` sets every field explicitly, so its values override
-`SearchRequest`'s. Four have drifted: `depth_limit` maximum, `max_tool_calls`,
-`use_graph` and `include_explanation`. A caller who omits them gets
-different behaviour from someone using the search form.
-
-**Planned:** align them, add a test that diffs every shared field between
-the two models programmatically, and generate `docs/openapi.json` at
-build time with a test that fails when it drifts from the code.
-
 ---
 
 ## Planned features
 
-### Departure times in the airport's local time
+### Local departure times
 
 Everything is UTC today. That is correct internally - aviation runs on
 UTC and so do the data sources - and wrong at the interface, where a
 passenger has a boarding pass that says 4:15 PM and the form wants 20:15.
 
-The design decision that matters: a departure time is local to the
-*origin airport*, not to the person searching. Someone in Pittsburgh
-looking up a Tokyo departure wants JST. A picker defaulting to the
-browser's timezone would be wrong for most searches.
+The right design decision: a departure time is local to the origin
+airport, not to the person searching. Someone in Pittsburgh looking up a
+Tokyo departure wants JST. A picker defaulting to the browser's timezone
+would be wrong for most searches.
 
 **Shape:** a toggle above the time field switching between UTC and the
 origin airport's local time. The field converts; the form still sends
@@ -220,8 +158,8 @@ optimising the wrong thing.
 
 ## Contributing
 
-Issues and pull requests are welcome, particularly on the known gaps
-above. There is no contribution process beyond opening one, and I make no
+Issues and pull requests are welcome, particularly on anything above.
+There is no contribution process beyond opening one, and I make no
 promises about response times - see [SECURITY.md](SECURITY.md) for the
 same caveat applied to vulnerability reports.
 
