@@ -301,10 +301,10 @@ them.
 
 ### The result worth reading about
 
-In one build the explainer's measured acceptance rate was **91%** and its
-true acceptance rate was **100%**. Every rejection was the validator being
-wrong - four distinct classes of false positive, each an accurate paragraph
-discarded for naming a severity in order to deny it:
+In one build, the explainer's measured acceptance rate was 91%, 40 of 44 accepted. 
+All four rejections were audited, and all four were false positives: one class, 
+each an accurate paragraph discarded for naming a severity in order to deny it.  
+The accepted outputs were not audited, so the false-negative rate is unknown. 
 
 > "There is no basis in the available data to characterize conditions as
 > light, moderate, or severe."
