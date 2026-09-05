@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS edge_events (
     asn_name    TEXT,
     path        TEXT,
     score       INTEGER,
+    probe       INTEGER NOT NULL DEFAULT 0,
     dedup_key   TEXT NOT NULL UNIQUE
 );
 CREATE INDEX IF NOT EXISTS idx_edge_when ON edge_events(occurred_at);
@@ -56,6 +57,15 @@ CHALLENGE_REFUSAL = "challenge_refusal"
 
 def init_edge_events(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # CREATE TABLE IF NOT EXISTS leaves an existing table alone, so a
+    # database written before `probe` existed never gains the column from
+    # the schema above. Added here instead, idempotently, because the
+    # alternative is a status page that reads a column that is not there.
+    columns = {row[1] for row in conn.execute(
+        "PRAGMA table_info(edge_events)")}
+    if "probe" not in columns:
+        conn.execute("ALTER TABLE edge_events "
+                     "ADD COLUMN probe INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
@@ -77,7 +87,8 @@ def record_events(conn: sqlite3.Connection,
     """Insert events, ignoring ones already seen. Returns the number added."""
     rows = [(e.get("occurred_at"), e.get("kind"), e.get("detail"),
              e.get("country"), e.get("asn_name"), e.get("path"),
-             e.get("score"), e["dedup_key"]) for e in events]
+             e.get("score"), 1 if e.get("probe") else 0,
+             e["dedup_key"]) for e in events]
     if not rows:
         return 0
 
@@ -85,7 +96,7 @@ def record_events(conn: sqlite3.Connection,
     conn.executemany(
         "INSERT OR IGNORE INTO edge_events "
         "(occurred_at, kind, detail, country, asn_name, path, score, "
-        " dedup_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        " probe, dedup_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
 
     cutoff = (datetime.now(timezone.utc)
               - timedelta(days=retention_days)).isoformat()
@@ -102,21 +113,32 @@ def _rows(conn: sqlite3.Connection, sql: str, args: tuple) -> list[dict]:
 def summary(conn: sqlite3.Connection,
             days: int = RETENTION_DAYS) -> dict:
     """Everything the three edge panels need, over the same window as the
-    rest of the page."""
+    rest of the page.
+
+    Every count here excludes the operator's own probes. check_edge.sh
+    fires four attack vectors an hour from a known address, and each one
+    trips several rule families, so on a site this quiet the self-check
+    was most of the firewall panel - 625 of 673 detections were United
+    States, which is to say were the check itself. The probes are marked
+    at ingest rather than dropped, and returned under `self_check` so the
+    page can say how many were set aside. Hiding them would replace one
+    wrong number with another.
+    """
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
     def top(kind: str, column: str, limit: int = 6) -> list[dict]:
         return _rows(conn, f"""
             SELECT COALESCE({column}, 'unknown') AS label, COUNT(*) AS n
             FROM edge_events
-            WHERE kind = ? AND occurred_at >= ?
+            WHERE kind = ? AND occurred_at >= ? AND probe = 0
             GROUP BY label ORDER BY n DESC LIMIT {limit}""", (kind, since))
 
     waf_totals = _rows(conn, """
         SELECT COUNT(*) AS detections,
                SUM(CASE WHEN score >= 5 THEN 1 ELSE 0 END) AS would_block,
                MAX(score) AS worst_score
-        FROM edge_events WHERE kind = ? AND occurred_at >= ?""",
+        FROM edge_events
+        WHERE kind = ? AND occurred_at >= ? AND probe = 0""",
         (WAF, since))[0]
 
     # Counted from the deduplication key rather than the address, which is
@@ -124,8 +146,17 @@ def summary(conn: sqlite3.Connection,
     # requests in the same second, which is a price worth paying.
     waf_sources = _rows(conn, """
         SELECT COUNT(DISTINCT country || '/' || COALESCE(asn_name, '')) AS n
-        FROM edge_events WHERE kind = ? AND occurred_at >= ?""",
+        FROM edge_events
+        WHERE kind = ? AND occurred_at >= ? AND probe = 0""",
         (WAF, since))[0]["n"]
+
+    # What was set aside, so the page can account for it rather than
+    # appear to have lost traffic between one deploy and the next.
+    self_check = {row["label"]: row["n"] for row in _rows(conn, """
+        SELECT kind AS label, COUNT(*) AS n
+        FROM edge_events
+        WHERE occurred_at >= ? AND probe = 1
+        GROUP BY kind""", (since,))}
 
     return {
         "window_days": days,
@@ -141,4 +172,9 @@ def summary(conn: sqlite3.Connection,
         "blocked": top(EDGE_BLOCK, "detail"),
         "blocked_countries": top(EDGE_BLOCK, "country", 8),
         "refusals": top(CHALLENGE_REFUSAL, "detail"),
+        "self_check": {
+            "waf": self_check.get(WAF, 0),
+            "edge_block": self_check.get(EDGE_BLOCK, 0),
+            "total": sum(self_check.values()),
+        },
     }
