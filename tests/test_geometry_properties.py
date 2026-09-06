@@ -90,9 +90,24 @@ def route(draw, min_nm: float = 100.0, max_nm: float = 6000.0):
 
     end_lon, end_lat, _ = _GEOD.fwd(start_lon, start_lat, bearing,
                                     distance_nm * 1852.0)
-    # A bearing that runs over a pole produces a route no aircraft flies and
-    # a projection nobody should trust. Nudged rather than discarded.
-    assume(-FLYABLE_LAT <= end_lat <= FLYABLE_LAT)
+    # A bearing that runs over a pole produces a route no aircraft flies
+    # and a projection nobody should trust. Nudged rather than discarded.
+    #
+    # Checking the endpoints does not do that, which took a Hypothesis
+    # failure to notice: due north from 53N for 3,642 nm crosses the pole
+    # at 89.2N and comes down the far meridian at 66.6N. Both ends sit
+    # inside the band and the path left it entirely. Roughly 4% of draws
+    # at 4,000 nm are that shape, and one of them broke the overlap
+    # symmetry property - correctly, because an azimuthal projection
+    # anchored on a midpoint cannot describe a corridor that passes
+    # within a degree of the pole.
+    #
+    # So sample the path, not its ends. Total rejection goes from 2.8% to
+    # 6.8%, which Hypothesis absorbs without complaint.
+    path = ([(start_lon, start_lat)]
+            + _GEOD.npts(start_lon, start_lat, end_lon, end_lat, 15)
+            + [(end_lon, end_lat)])
+    assume(all(-FLYABLE_LAT <= lat <= FLYABLE_LAT for _, lat in path))
     return (start_lat, start_lon), (end_lat, normalize_longitude(end_lon))
 
 
