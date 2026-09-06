@@ -129,7 +129,7 @@ alive at one depth costs metered API calls at the next.
 
 The explainer takes twelve structured facts and is only allowed to repeat
 them. Those twelve are also where prompt injection would have to arrive,
-and eleven of them are computed here: enums, integers, floats, and strings
+and ten of them are computed here: enums, integers, floats, and strings
 built from validated airport codes. **There is no free-text field, so a
 caller cannot reach the model with anything they wrote.** The two that can
 carry outside text are the aircraft variant, passed through from the flight
