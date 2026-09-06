@@ -63,3 +63,5 @@ data/
 .env
 secrets.*
 .claude/
+#
+redteam*.jsonl
