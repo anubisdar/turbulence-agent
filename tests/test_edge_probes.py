@@ -176,7 +176,16 @@ class TestWafClassification:
         """--no-probe-filter, and the behaviour before this change."""
         lines = [waf_line(now - 60, PROBE_IP, "/?file=x", "P1",
                           "attack-lfi", 40)]
+        assert ing.read_waf(lines, {}, None)[0]["probe"] is False
+
+    def test_an_empty_set_is_not_the_same_as_marking_off(self, now):
+        """An empty set means "on, and no probe address was seen". None
+        means "off". Collapsing the two is what let --no-probe-filter
+        disable the address path while the agent path kept marking."""
+        lines = [waf_line(now - 60, PROBE_IP, "/?file=x", "P1",
+                          "attack-lfi", 40)]
         assert ing.read_waf(lines, {}, set())[0]["probe"] is False
+        assert ing.read_waf(lines, {}, None)[0]["probe"] is False
 
     def test_the_dedup_key_does_not_depend_on_the_flag(self, now):
         """Re-reading a window ingested before the flag existed must not
@@ -198,6 +207,16 @@ class TestEdgeBlockClassification:
         events = ing.read_edge_blocks(path, since, {}, set())
         assert len(events) == 1
         assert events[0]["probe"] is True
+
+    def test_marking_off_ignores_the_agent_too(self, tmp_path, now, since):
+        """The bug --no-probe-filter had. The agent check ran whatever
+        the address set said, so the flag switched off half the marking
+        and then reported the other half as probes."""
+        path = write_log(tmp_path, [
+            access_line(now - 60, PROBE_IP, PROBE_UA, "/?file=x"),
+        ])
+        assert ing.read_edge_blocks(path, since, {}, None)[0]["probe"] \
+            is False
 
     def test_the_scanner_vector_is_caught_by_address(self, tmp_path, now,
                                                      since):

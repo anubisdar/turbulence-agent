@@ -235,7 +235,7 @@ def read_waf(lines: list[str], cache: dict,
                                       timezone.utc).isoformat()
         country, network = _origin(cache, rec["ip"]) if rec["ip"] \
             else ("unknown", "unknown")
-        is_probe = bool(probes) and rec["ip"] in probes
+        is_probe = probes is not None and rec["ip"] in probes
         # A request tripping both SQLi and XSS counts against each family.
         for family in rec["families"] or {"uncategorised"}:
             events.append({
@@ -322,8 +322,15 @@ def read_edge_blocks(path: str, since: datetime, cache: dict,
                 # Here the agent is on the record itself, so the address
                 # set is only a fallback - it catches the scanner vector,
                 # which sends a scanner's agent by design.
-                is_probe = (bool(PROBE_UA.search(_user_agent(entry)))
-                            or (bool(probes) and ip in probes))
+                # `probes is None` means the marking is switched off
+                # entirely. An empty set means it is on and no probe
+                # address was seen, which is a different thing: without
+                # the distinction --no-probe-filter disabled the address
+                # path and left the agent path running, so the flag
+                # reported marking probes it had been told to ignore.
+                is_probe = probes is not None and (
+                    bool(PROBE_UA.search(_user_agent(entry)))
+                    or ip in probes)
                 events.append({
                     "occurred_at": datetime.fromtimestamp(
                         when, timezone.utc).isoformat(),
@@ -355,7 +362,7 @@ def main() -> int:
         minutes=args.lookback_minutes)
     cache: dict = {}
 
-    probes = set() if args.no_probe_filter \
+    probes = None if args.no_probe_filter \
         else probe_addresses(args.caddy_log, since)
 
     lines = _journal(args.lookback_minutes)
@@ -370,8 +377,11 @@ def main() -> int:
 
     if args.dry_run:
         print(f"  would insert {len(events)} event(s): {by_kind or 'none'}")
-        print(f"  {marked} marked as the operator's own probes, from "
-              f"{len(probes)} address(es)")
+        if probes is None:
+            print("  probe marking is off; all of these count as traffic")
+        else:
+            print(f"  {marked} marked as the operator's own probes, from "
+                  f"{len(probes)} address(es)")
         return 0
 
     conn = sqlite3.connect(args.db)

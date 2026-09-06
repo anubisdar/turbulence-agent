@@ -550,13 +550,55 @@ function render(d){
   }));
 }
 
-fetch('/api/status')
-  .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
-  .then(render)
-  .catch(e => {
-    $('main').innerHTML =
-      `<div class="empty">Could not load status: ${esc(e.message)}</div>`;
-  });
+//: The page fetched once and then sat there. What it describes moves on
+//: its own - the ingest timer writes edge events, a search lands the
+//: moment it finishes - so a tab left open all afternoon was showing
+//: whatever was true when it loaded, with nothing on screen saying so.
+//:
+//: Thirty seconds: close enough that the page and the instance agree,
+//: slow enough that a forgotten tab is two requests a minute against an
+//: endpoint that has its own rate-limit zone for exactly this reason.
+const REFRESH_MS = 30000;
+let refreshTimer = null;
+let everLoaded = false;
+
+function load(){
+  return fetch('/api/status', {cache: 'no-store'})
+    .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+    .then(d => { render(d); everLoaded = true; })
+    .catch(e => {
+      // A failed refresh must not throw away a page that worked. The
+      // previous handler replaced main with the error unconditionally,
+      // so one blip on a tab left open overnight lost the last good
+      // render and replaced real numbers with nothing.
+      if (!everLoaded){
+        $('main').innerHTML =
+          `<div class="empty">Could not load status: ${esc(e.message)}</div>`;
+      } else {
+        $('stamp').textContent = 'stale \u00b7 ' + e.message;
+      }
+    });
+}
+
+function schedule(on){
+  clearInterval(refreshTimer);
+  refreshTimer = on ? setInterval(load, REFRESH_MS) : null;
+}
+
+// Polling a hidden tab is spend with nobody watching. Refresh on the way
+// back so the first thing seen is current rather than however old the
+// tab was when it lost focus.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden){
+    schedule(false);
+  } else {
+    load();
+    schedule(true);
+  }
+});
+
+load();
+schedule(true);
 </script>
 </body>
 </html>
