@@ -71,15 +71,43 @@ SOFTENING = (
 #: negation-detection approach used on clinical text, which has the same
 #: problem: a word appearing in a note does not mean the finding is present.
 _NEGATION_CUES = (
-    "no basis", "no evidence", "no reports", "no forecast", "not",
+    # Singular forms on purpose: these are substring tests, so "no report"
+    # also matches "no reports". The plural-only list missed "no report
+    # supports calling the conditions light, moderate, or severe".
+    "no basis", "no evidence", "no report", "no forecast", "no data",
+    "no information", "no polygon", "not",
     "never", "cannot", "can't", "without", "neither", "nor", "absence",
     "lack of", "nothing", "unresolved", "does not", "do not", "is not",
 )
 
-#: Fragments shorter than this are not clauses. An enumeration such as
-#: "light, moderate, or severe" splits on its commas into pieces that
-#: belong to the phrase governing them, so they are merged back.
+#: Fragments shorter than this are not clauses.
 _MIN_CLAUSE_WORDS = 3
+
+#: A fragment opening with one of these attaches to the clause before it
+#: instead of starting a new assertion. A relative pronoun has nothing to
+#: modify but what precedes it, and a comparative extends the same
+#: predicate rather than making a second one. Without this, the negation
+#: in "an unresolved reading is an absence of information, which is a
+#: different thing from a smooth-air finding" is stranded one clause back
+#: and the denial reads as a claim.
+_CONTINUATION = re.compile(
+    r"^(?:which|who|whom|whose|rather\s+than|instead\s+of|"
+    r"as\s+opposed\s+to|other\s+than|different\s+(?:thing|from)|"
+    r"not\s+the\s+same|nor)\b")
+
+#: An enumeration tail: an optional conjunction and then a severity word.
+#: "or severe on this route" belongs to the phrase that governs the list,
+#: however long the trailing prepositional phrase runs. Deliberately
+#: narrow - it requires the severity word first, so "expect moderate chop"
+#: is still a new assertion and still caught.
+_ENUM_TAIL = re.compile(
+    r"^(?:or|and)?\s*(?:smooth|light|moderate|severe|extreme)\b")
+
+
+def _continues(part: str) -> bool:
+    """Whether a fragment extends the previous clause rather than starting
+    a new one."""
+    return bool(_CONTINUATION.match(part) or _ENUM_TAIL.match(part))
 
 
 def _clauses(sentence: str) -> list[str]:
@@ -96,7 +124,8 @@ def _clauses(sentence: str) -> list[str]:
         part = part.strip()
         if not part:
             continue
-        if clauses and len(part.split()) < _MIN_CLAUSE_WORDS:
+        if clauses and (len(part.split()) < _MIN_CLAUSE_WORDS
+                        or _continues(part)):
             clauses[-1] += " " + part
         else:
             clauses.append(part)
