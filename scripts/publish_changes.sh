@@ -63,7 +63,6 @@ die()  { printf '  \033[31mSTOP  %s\033[0m\n' "$*" >&2; exit 1; }
 
 # Each group becomes one commit, so the history says what changed and
 # why rather than "updates". Format: subject, then the files.
-#
 GROUP_1_SUBJECT="Mark the operator's own probes at ingest"
 GROUP_1_FILES=(app/edge_events.py
                scripts/ingest_edge_events.py
@@ -153,11 +152,44 @@ the .gitignore in this repository opens by saying every pattern in it has
 held a live credential. A blanket add on a public repository is how one
 of them gets published."
 
+GROUP_5_SUBJECT="Scope a denial to the sentence, not to the comma"
+GROUP_5_FILES=(app/reasoning/explainer.py
+               tests/test_redteam_validator.py)
+GROUP_5_BODY="Five of the six known false positives shared one cause, and it
+was never about enumerations. _clauses split on every comma and _denied
+required the negation cue in the same clause as the severity word, so any
+denial whose scope crossed a comma was read as a claim. It presented as
+four separate classes - an enumeration tail, a missing Oxford comma, a
+relative clause, a prepositional phrase.
+
+Two narrow rules now let a fragment continue the clause before it. A
+relative pronoun or comparative has nothing to attach to but what
+precedes it. An enumeration tail - an optional conjunction then a
+severity word - belongs to the phrase governing the list, however long
+its trailing prepositional phrase.
+
+The severity word has to come first in the enumeration rule. That is what
+keeps 'expect moderate chop' a new assertion, and the test asserting the
+naive word-count widening is not the fix still passes.
+
+The cue list was plural-only, so 'no report supports calling the
+conditions light, moderate, or severe' missed while 'no reports' matched.
+Singular forms now, since these are substring tests.
+
+One of the five was written by the model, not by the author: the only
+violation the control arm produced in fifty live generations under the
+shipped prompt, and it was wrong. Its test moves to TestLegitimateOutput
+with that provenance recorded.
+
+Four evasions and two false positives remain, still xfail(strict). The
+coverage rule needs rewriting rather than patching, and paraphrased
+reassurance is not closable with a phrase list at all."
+
 # GROUPS is a bash built-in holding the current user's supplementary
 # group ids. Assigning to it is silently ignored, and the loop below then
 # reads the real one - "0" for root - producing an unbound-variable error
 # on GROUP_0_SUBJECT with nothing to say it came from a name collision.
-COMMIT_GROUPS=(1 2 3 4)
+COMMIT_GROUPS=(1 2 3 4 5)
 
 # ------------------------------------------------------------- preflight
 bold "Preflight"
