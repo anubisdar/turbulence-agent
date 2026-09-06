@@ -438,31 +438,48 @@ function render(d){
         <div class="aside">The firewall runs before the geo filter, so it
           sees traffic no other panel does - including requests
           rejected a moment later for being outside the US. Counted per
-          request: one request tripping four rules is one detection.</div>`}
+          rule family: one request tripping four rules is four detections,
+          so this number is larger than the number of requests.</div>
+        ${((d.self_check || {}).waf || 0)
+          ? `<div class="aside">Excludes the hourly health check, which
+              fires four attack patterns from a US address and trips
+              several families with each one.
+              <b>${n(d.self_check.waf)}</b> detections in this window were
+              its own and are not counted above. They are marked in the
+              record, not discarded - a check that watches itself is worth
+              knowing about, but it is not traffic.</div>`
+          : ''}`}
     </div>
 
     <div class="panel">
       <h2>Blocked at the edge</h2>
-      <p class="note">stopped by the GeoIP filter, the rate limit or the
+      <p class="note">refused by the geo filter, the rate limit or the
         firewall, so they never reached the application</p>
       ${d.edge_note
         ? `<div class="empty">${esc(d.edge_note)}</div>`
         : `
           <div class="big">
             <b>${n((d.blocked || []).reduce((t, r) => t + r.n, 0))}</b>
-            <span>blocked by the geo filter, rate limit or firewall${
+            <span>refused${
               (d.blocked || []).length
                 ? ' &middot; ' + d.blocked.map(r =>
-                    `${r.n} ${esc(r.label)}`).join(' &middot; ')
+                    `${n(r.n)} ${esc(r.label)}`).join(' &middot; ')
                 : ''}</span>
           </div>
           <div class="cols">
             ${rows(d.blocked_countries, r => r.label, r => r.n,
                    'No blocked requests in the recent log.')}
           </div>
-          <div class="aside">Which countries these were is the one thing the
-            panel above cannot show: it reports only what got through, and
-            everything that got through is US by definition.</div>`}
+          <div class="aside">Two gates, not one. The geo filter refuses
+            anything from outside the United States, which is why a single
+            country dominates. The firewall then inspects what is left, so
+            a US row here is a request that passed the country check and
+            failed on what it asked for.</div>
+          ${((d.self_check || {}).edge_block || 0)
+            ? `<div class="aside">Excludes the hourly health check:
+                <b>${n(d.self_check.edge_block)}</b> of its requests were
+                refused in this window and are not counted above.</div>`
+            : ''}`}
     </div>`;
 
   // The numbers and tables are the substance; the charts illustrate them.
