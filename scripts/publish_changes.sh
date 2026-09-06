@@ -67,6 +67,7 @@ die()  { printf '  \033[31mSTOP  %s\033[0m\n' "$*" >&2; exit 1; }
 GROUP_1_SUBJECT="Mark the operator's own probes at ingest"
 GROUP_1_FILES=(app/edge_events.py
                scripts/ingest_edge_events.py
+               app/web/static/status.html
                tests/test_edge_probes.py)
 GROUP_1_BODY="check_edge.sh sets a distinctive user agent on every probe so
 they can be excluded from the status page. Nothing read it. Four vectors
@@ -86,7 +87,12 @@ aside and reports the count under self_check so the panel can account for
 the difference rather than appear to lose traffic between deploys.
 
 The dedup key is unchanged, so re-reading a window ingested before the
-flag existed stays idempotent."
+flag existed stays idempotent.
+
+The status page reads self_check and says how much was set aside, and
+its firewall panel no longer claims one request tripping four rules is
+one detection - read_waf emits one row per family, which is why the
+path column exceeded the family column."
 
 GROUP_2_SUBJECT="Check the interpreter the report job actually uses"
 GROUP_2_FILES=(scripts/check_edge.sh)
