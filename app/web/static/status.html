@@ -106,6 +106,18 @@ table.slice .n{text-align:right; font-family:"IBM Plex Mono",monospace}
 }
 .aside.accent{border-left-color:var(--live)}
 .empty{padding:30px 0; text-align:center; color:var(--dim); font-size:13px}
+.checks{font-size:12.5px; margin-top:2px}
+.checks div{
+  display:flex; flex-wrap:wrap; justify-content:space-between; gap:4px 12px;
+  padding:5px 0; border-bottom:1px solid var(--rule);
+}
+.checks div:last-child{border-bottom:0}
+.checks code{
+  font:12px/1.4 "IBM Plex Mono",monospace; color:var(--mid);
+}
+.checks em{font-style:normal; color:var(--dim); text-align:right}
+.checks .outside code, .checks .outside i{color:var(--live)}
+.checks i{font-style:normal}
 footer{
   padding:6px 22px 26px; max-width:1180px; margin:0 auto;
   font-size:12px; color:var(--dim);
@@ -327,23 +339,52 @@ function render(d){
         <h2>Prompt injection monitoring</h2>
         <p class="note">at model ingress &middot; every field checked against
           its expected shape before the prompt is sent</p>
-        ${!(d.fact_problems || {}).searches
-          ? `<div class="ok-note">Every fact matched its shape on every
-             search in this window.</div>`
-          : `<div class="big">
+        ${(d.fact_problems || {}).searches
+          ? `<div class="big">
                <b class="caution">${n(d.fact_problems.problems)}</b>
                <span>problem${d.fact_problems.problems === 1 ? '' : 's'}
                  across <b>${n(d.fact_problems.searches)}</b>
-                 search${d.fact_problems.searches === 1 ? '' : 'es'}</span>
+                 search${d.fact_problems.searches === 1 ? '' : 'es'}
+                 of <b>${n(d.fact_problems.checked)}</b> checked</span>
              </div>
              <div class="aside accent">A field outside its shape means a
                data provider sent something unexpected, or something tried
                to reach the model through one of the two fields this system
                does not compute. Read them with
                <code>journalctl -t turbulence-agent | grep "fact shape"</code>.
-               </div>`}
-        <div class="aside">Ten of the twelve fields are computed here
-          and cannot carry text. The two that can - the aircraft
+               </div>`
+          : (d.fact_problems || {}).checked
+          ? `<div class="big">
+               <b>${n(d.fact_problems.checked)}</b>
+               <span>search${d.fact_problems.checked === 1 ? '' : 'es'}
+                 checked &middot; nothing outside its shape</span>
+             </div>`
+          : `<div class="empty">No searches in this window, so nothing
+             has been checked. This panel reports what the shape check
+             found, not that it is working.</div>`}
+        <div class="col-head">WHAT IS CHECKED</div>
+        <div class="checks">
+          <div><code>route</code><em>KIAD to KLAX</em></div>
+          <div><code>reading</code><em>one of six severities</em></div>
+          <div><code>pilot_reports</code><em>severity + count</em></div>
+          <div><code>forecast</code><em>severity + count</em></div>
+          <div><code>route_coverage_fraction</code><em>0 to 1</em></div>
+          <div><code>corridors_considered</code><em>0 to 1,000</em></div>
+          <div><code>corridors_kept</code><em>0 to 1,000</em></div>
+          <div><code>sources_disagree</code><em>true or false</em></div>
+          <div><code>search_was_truncated</code><em>true or false</em></div>
+          <div><code>cruise_band</code><em>FL320 to FL340</em></div>
+          <div class="outside"><code>aircraft</code>
+            <em>40 chars, no markup &middot; <i>outside text</i></em></div>
+          <div class="outside"><code>plain_summary</code>
+            <em>900 chars, no markup &middot; <i>outside text</i></em></div>
+        </div>
+        <div class="aside">Any thirteenth field is a problem in itself.
+          The two in blue carry text this system did not compute, and both
+          are checked for markup, code fences and role markers before the
+          prompt is assembled.</div>
+        <div class="aside accent">Ten of the twelve fields are computed
+          here and cannot carry text. The two that can - the aircraft
           variant, passed through from the flight data provider, and the
           plain summary - are the fields being monitored for
           manipulation.</div>
