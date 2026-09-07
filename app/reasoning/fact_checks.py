@@ -146,9 +146,14 @@ def check_facts(facts: dict[str, Any]) -> list[str]:
         problems += _check_text("plain_summary", facts["plain_summary"],
                                 max_chars=_MAX_SUMMARY_CHARS)
 
-    # The two fields carrying text this system did not compute.
+    # The one field carrying text this system did not compute. The
+    # variant comes from the flight data provider and is the only value
+    # in the whole payload written by somebody else.
     if "aircraft" in facts:
         problems += _check_text("aircraft", facts["aircraft"], _AIRCRAFT)
+    # Computed here from the winning corridor's altitudes, and shape
+    # checked anyway: a format this strict costs nothing to assert and
+    # catches a bug in our own code as readily as anything else.
     if "cruise_band" in facts:
         problems += _check_text("cruise_band", facts["cruise_band"],
                                 _CRUISE_BAND)

@@ -11,6 +11,9 @@ project has already paid for twice in the explainer's own validator. A
 field is either the kind of value it claims to be or it is not.
 """
 
+import re
+from pathlib import Path
+
 import pytest
 
 from app.reasoning.fact_checks import check_facts
@@ -188,6 +191,42 @@ class TestItBecomesANumber:
         totals = summary(conn)["fact_problems"]
         assert totals["searches"] == 2
         assert totals["problems"] == 3
+        # And how many were looked at, which is the number the panel
+        # needs to say anything at all when nothing is wrong.
+        assert totals["checked"] == 5
+
+    def test_a_clean_window_is_not_an_empty_one(self):
+        """The distinction the panel could not draw.
+
+        `searches` counts only the searches that had a problem, so it is
+        zero for a window where forty searches were checked and nothing
+        was out of shape, and zero for a window where nothing ran. The
+        status page keyed off that one number and said "every fact
+        matched its shape on every search" in both cases - a claim about
+        forty searches, and the same claim about none of them.
+
+        `checked` is what separates them, and it is the evidence: a shape
+        check that ran forty times and found nothing is a result, while
+        an empty window is an absence of one.
+        """
+        import sqlite3
+
+        from app.runs import RunRecord, init_runs, record_run, summary
+
+        empty = sqlite3.connect(":memory:")
+        init_runs(empty)
+
+        clean = sqlite3.connect(":memory:")
+        init_runs(clean)
+        for _ in range(4):
+            record_run(clean, RunRecord(request_id="x", fact_problems=0))
+
+        a = summary(empty)["fact_problems"]
+        b = summary(clean)["fact_problems"]
+        assert a["searches"] == b["searches"] == 0, (a, b)
+        assert a["problems"] == b["problems"] == 0, (a, b)
+        assert a["checked"] == 0 and b["checked"] == 4, (a, b)
+        assert a != b, "an empty window must not look like a clean one"
 
     def test_an_empty_window_reports_zero_rather_than_failing(self):
         import sqlite3
@@ -196,5 +235,62 @@ class TestItBecomesANumber:
 
         conn = sqlite3.connect(":memory:")
         init_runs(conn)
-        assert summary(conn)["fact_problems"] == {"searches": 0,
+        assert summary(conn)["fact_problems"] == {"checked": 0,
+                                                  "searches": 0,
                                                   "problems": 0}
+
+
+class TestThePageNamesWhatIsChecked:
+    """The status page lists the twelve fields and what each is checked
+    against. That list is static markup, so nothing stops it drifting
+    from `report_facts` the moment a thirteenth field is added or a rule
+    is renamed - and a page describing a control that no longer matches
+    the control is worse than a page that says nothing.
+    """
+
+    PAGE = Path(__file__).resolve().parent.parent \
+        / "app" / "web" / "static" / "status.html"
+
+    def _allowlist(self) -> set[str]:
+        """The field names report_facts accepts, read from the source.
+
+        Read rather than imported because the set is a literal inside the
+        function; importing it would mean exporting it, and the point is
+        to notice when the literal changes.
+        """
+        import app.reasoning.fact_checks as fc
+        source = Path(fc.__file__).read_text()
+        block = source[source.index("unexpected = set(facts) - {"):]
+        block = block[:block.index("}")]
+        return set(re.findall(r'"([a-z_]+)"', block))
+
+    def _listed(self) -> set[str]:
+        page = self.PAGE.read_text()
+        block = page[page.index('<div class="checks">'):]
+        block = block[:block.index("</div>\n        <div class=\"aside\"")]
+        return set(re.findall(r"<code>([a-z_]+)</code>", block))
+
+    def test_the_page_lists_every_field_the_checker_accepts(self):
+        listed, allowed = self._listed(), self._allowlist()
+        assert listed == allowed, (
+            f"the page and report_facts disagree. "
+            f"only in the checker: {sorted(allowed - listed)}; "
+            f"only on the page: {sorted(listed - allowed)}")
+
+    def test_there_are_twelve_of_them(self):
+        """The prose says twelve, and says ten of them are computed
+        here. Both numbers are wrong the moment a field is added."""
+        assert len(self._allowlist()) == 12
+        page = self.PAGE.read_text()
+        assert "Ten of the twelve fields" in page
+
+    def test_the_two_carrying_outside_text_are_marked(self):
+        """The claim in the prose has to be visible in the table. These
+        are the two the module docstring names as carrying text this
+        system did not write."""
+        page = self.PAGE.read_text()
+        block = page[page.index('<div class="checks">'):]
+        block = block[:block.index("</div>\n        <div class=\"aside\"")]
+        marked = set(re.findall(
+            r'class="outside"><code>([a-z_]+)</code>', block))
+        assert marked == {"aircraft", "plain_summary"}, marked

@@ -551,11 +551,22 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
     # Zero on every ordinary search, so a non-zero value is the whole
     # signal. Counted rather than sampled: this is rare enough that every
     # occurrence is worth seeing.
+    #
+    # Both numbers, not just the bad one. `searches` used to count only
+    # the searches that had a problem, which meant it was zero when the
+    # window was clean and zero when the window was empty - the panel
+    # could not tell "twelve fields checked on forty searches and nothing
+    # was out of shape" from "nothing has run". The first is the evidence
+    # the panel exists to show; the second is an absence of evidence, and
+    # they were rendering as the same sentence.
     fact_problems = _rows(conn, """
-        SELECT COUNT(*) AS searches, SUM(fact_problems) AS problems
+        SELECT COUNT(*)                                AS checked,
+               SUM(CASE WHEN COALESCE(fact_problems, 0) > 0
+                        THEN 1 ELSE 0 END)             AS searches,
+               SUM(COALESCE(fact_problems, 0))         AS problems
         FROM search_runs
         WHERE started_at >= ?
-          AND COALESCE(source, 'live') = 'live' AND COALESCE(fact_problems, 0) > 0""",
+          AND COALESCE(source, 'live') = 'live'""",
         (since,))[0]
 
     # Sliced, not just totalled. An aggregate acceptance rate of 91% hid
@@ -598,6 +609,7 @@ def summary(conn: sqlite3.Connection, days: int = RETENTION_DAYS
         "challenges": challenges,
         "by_outcome": by_outcome,
         "fact_problems": {
+            "checked": fact_problems["checked"] or 0,
             "searches": fact_problems["searches"] or 0,
             "problems": fact_problems["problems"] or 0,
         },

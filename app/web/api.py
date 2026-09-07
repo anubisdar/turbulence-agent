@@ -436,15 +436,30 @@ def _edge_summary() -> dict:
     finally:
         conn.close()
 
-    empty = not any([data["waf"]["detections"], data["blocked"],
-                     data["refusals"]])
-    return {
-        **data,
-        "available": True,
-        "note": ("No edge events recorded yet. These arrive from a timer "
-                 "rather than from searches, so check that "
-                 "ingest-edge-events.timer is running." if empty else None),
-    }
+    recorded = any([data["waf"]["detections"], data["blocked"],
+                    data["refusals"]])
+    set_aside = (data.get("self_check") or {}).get("total") or 0
+
+    # Three states, not two. A store holding nothing and a store holding
+    # nothing but the operator's own probes both leave every panel blank,
+    # and the first message - check that the timer is running - sends you
+    # to the one thing that is definitely working. On a site this quiet
+    # the second state is the common one: four attack patterns an hour
+    # from a known address, and days at a time when nobody else arrives.
+    if recorded:
+        note = None
+    elif set_aside:
+        note = (f"Nothing arrived but the operator's own health check. "
+                f"{set_aside} event{'' if set_aside == 1 else 's'} were "
+                f"recorded in this window and every one of them was the "
+                f"hourly self-check, which these panels exclude. The "
+                f"timer is working; there was simply no outside traffic.")
+    else:
+        note = ("No edge events recorded yet. These arrive from a timer "
+                "rather than from searches, so check that "
+                "ingest-edge-events.timer is running.")
+
+    return {**data, "available": True, "note": note}
 
 
 @app.get("/status", include_in_schema=False)
