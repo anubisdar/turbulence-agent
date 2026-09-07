@@ -14,7 +14,9 @@
 #
 # WHAT IT REFUSES ON. A detached HEAD, the wrong remote, a branch behind
 # origin, a staged file that .gitignore should have caught, an obvious
-# credential in the staged diff, or a failing test suite. Each one stops
+# credential in the staged diff, a failing test suite, or a dirty file
+# that is in no group - because silently skipping that one is how a
+# change gets left behind and found later as an untidy tree. Each one stops
 # before anything is written; nothing here rewrites history and nothing
 # uses --force.
 #
@@ -30,6 +32,7 @@
 #   ./scripts/publish_changes.sh --commit --push
 #
 #   --no-tests        skip the suite (it is the gate; say why in the log)
+#   --allow-unlisted  commit anyway while files sit outside every group
 #   --remote NAME     default origin
 #
 # The GROUP_n_* variables below are read through indirect expansion. The
@@ -40,6 +43,7 @@ set -uo pipefail
 COMMIT=0
 PUSH=0
 RUN_TESTS=1
+ALLOW_UNLISTED=0
 REMOTE=origin
 EXPECT_REPO="turbulence-agent"
 
@@ -48,6 +52,7 @@ while [[ $# -gt 0 ]]; do
     --commit)   COMMIT=1 ;;
     --push)     PUSH=1 ;;
     --no-tests) RUN_TESTS=0 ;;
+    --allow-unlisted) ALLOW_UNLISTED=1 ;;
     --remote)   REMOTE="$2"; shift ;;
     -h|--help)  sed -n '/^# Usage:/,/^$/p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -185,11 +190,39 @@ Four evasions and two false positives remain, still xfail(strict). The
 coverage rule needs rewriting rather than patching, and paraphrased
 reassurance is not closable with a phrase list at all."
 
+GROUP_6_SUBJECT="Say what the shape check looked at, and at what"
+GROUP_6_FILES=(app/runs.py
+               app/web/api.py
+               app/reasoning/fact_checks.py
+               tests/test_fact_checks.py)
+GROUP_6_BODY="Three panels could not tell an absence of data from a clean
+result, and each rendered the reassuring reading of the two.
+
+The fact_problems query counted only searches that had a problem, so
+'searches' was zero for a clean window and zero for an empty one. The
+page keyed off that and said 'every fact matched its shape on every
+search' in both cases - a claim about forty searches, and the same
+sentence about none. It now reports how many were checked.
+
+_edge_summary compared probe-filtered numbers, so a store holding
+nothing and a store holding nothing but the hourly self-check both said
+'no edge events recorded yet, check that the timer is running' - which
+sends you to the one thing that is definitely working.
+
+The page now lists all twelve fields and the shape each is checked
+against, with a test that reads the allowlist out of report_facts and
+the field names out of the markup and fails when they disagree.
+
+And the comment naming the two fields carrying outside text named
+cruise_band, which is computed here from the winning corridor's
+altitudes. The module docstring had it right: aircraft and the plain
+summary."
+
 # GROUPS is a bash built-in holding the current user's supplementary
 # group ids. Assigning to it is silently ignored, and the loop below then
 # reads the real one - "0" for root - producing an unbound-variable error
 # on GROUP_0_SUBJECT with nothing to say it came from a name collision.
-COMMIT_GROUPS=(1 2 3 4 5)
+COMMIT_GROUPS=(1 2 3 4 5 6)
 
 # ------------------------------------------------------------- preflight
 bold "Preflight"
@@ -266,6 +299,16 @@ OTHERS=$(git status --porcelain | awk '{print $2}' \
          | grep -vxF "$(printf '%s\n' "${PRESENT[@]}")" || true)
 if [[ -n "$OTHERS" ]]; then
   sed 's/^/    /' <<<"$OTHERS"
+  # Printing this and carrying on was the wrong default. A file that is
+  # not in a group is silently not committed, which is only noticed later
+  # as a dirty tree and a hand-written commit that says "and the rest".
+  # Naming it is not enough; the script has to make it a decision.
+  if [[ "$COMMIT" -eq 1 && "$ALLOW_UNLISTED" -ne 1 ]]; then
+    echo
+    dim "add each to a GROUP_n_FILES list above, or commit it by hand,"
+    dim "or re-run with --allow-unlisted to leave it for later."
+    die "dirty files are in no group; nothing was committed"
+  fi
   dim "these are left alone"
 else
   dim "nothing else is modified"
