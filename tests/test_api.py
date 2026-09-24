@@ -1104,3 +1104,62 @@ class TestDepartureTimeReachesTheForecast:
                          departure_time="14:00")
         assert any("not at departure" in n for n in data["notes"]), (
             "the reader is told the reading is about now, not the departure")
+
+
+class TestTripChat:
+    """The chat endpoint that replaced the four-field form. Runs without
+    ANTHROPIC_API_KEY, so this exercises the fallback path - the part of
+    the contract the API layer itself is responsible for: routing to
+    tripchat.respond, shaping its result, and applying the same human
+    check the search already sits behind."""
+
+    def test_a_message_gets_a_reply(self, client, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        r = client.post("/api/chat/trip", json={
+            "messages": [{"role": "user", "content": "PIT to BOS"}]})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["reply"]
+        assert body["complete"] is False
+        assert body["trip"] is None
+        assert body["source"] == "fallback"
+
+    def test_an_empty_message_list_is_rejected(self, client):
+        r = client.post("/api/chat/trip", json={"messages": []})
+        assert r.status_code == 422
+
+    def test_an_unknown_role_is_rejected(self, client):
+        r = client.post("/api/chat/trip", json={
+            "messages": [{"role": "system", "content": "hi"}]})
+        assert r.status_code == 422
+
+    def test_response_shape_carries_resolution_and_notes(self, client,
+                                                          monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        r = client.post("/api/chat/trip", json={
+            "messages": [{"role": "user", "content": "hello"}]})
+        body = r.json()
+        assert set(body) == {"reply", "complete", "trip", "resolution",
+                             "notes", "source"}
+        assert set(body["resolution"]) == {"origin", "dest"}
+
+    def test_a_long_conversation_is_clamped_when_public(self, client,
+                                                         monkeypatch):
+        """Mirrors TestPublicCeilings: a caller who never intends to search
+        can still run the model up indefinitely if the message count is
+        unbounded on a public deployment."""
+        import app.web.api as api
+        monkeypatch.setattr(api, "PUBLIC", True)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        messages = [{"role": "user", "content": f"message {i}"}
+                   for i in range(30)]
+        body = api.TripChatBody(messages=messages)
+        assert len(body.clamped().messages) == api.PUBLIC_MAX_CHAT_MESSAGES
+
+    def test_a_private_deployment_is_unclamped(self, monkeypatch):
+        import app.web.api as api
+        monkeypatch.setattr(api, "PUBLIC", False)
+        messages = [{"role": "user", "content": f"message {i}"}
+                   for i in range(30)]
+        body = api.TripChatBody(messages=messages)
+        assert len(body.clamped().messages) == 30

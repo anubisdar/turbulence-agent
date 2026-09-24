@@ -171,6 +171,48 @@ input:focus-visible,button:focus-visible,.row:focus-visible,.tab:focus-visible{
 .toggle input{accent-color:var(--live);width:15px;height:15px}
 .toggle:hover{color:var(--ink)}
 
+/* -------------------------------------------------------------- chat */
+.chat{display:flex;flex-direction:column;gap:0}
+.chat-log{
+  display:flex;flex-direction:column;gap:8px;max-height:260px;
+  overflow-y:auto;padding:2px 2px 4px;
+}
+.chat-msg{
+  max-width:92%;padding:8px 11px;font-size:13px;line-height:1.45;
+  border-radius:2px;
+}
+.chat-msg.user{
+  align-self:flex-end;background:var(--live);color:var(--on-live);
+}
+.chat-msg.assistant{
+  align-self:flex-start;background:var(--raised);border:1px solid var(--rule);
+  color:var(--ink);
+}
+.chat-msg.assistant.note{color:var(--muted);font-family:var(--fm);font-size:11.5px}
+.chat-msg.pending{align-self:flex-start;color:var(--dim);font-family:var(--fm);font-size:11px}
+.chat-input-row{display:flex;gap:6px;margin-top:8px}
+.chat-input-row input{
+  flex:1;background:var(--raised);border:1px solid var(--rule);
+  padding:8px 10px;font-size:14px;border-radius:0;
+}
+.chat-input-row button{
+  background:var(--live);color:var(--on-live);border:0;padding:0 14px;
+  cursor:pointer;font-family:var(--fd);font-weight:700;font-size:12px;
+  text-transform:uppercase;letter-spacing:.08em;
+}
+.chat-input-row button[disabled]{background:var(--dim);cursor:progress}
+.trip-set{
+  margin-top:10px;padding:9px 11px;background:var(--raised);
+  border-left:2px solid var(--live);font-size:13px;
+}
+.trip-set b{font-family:var(--fd);letter-spacing:.03em}
+.trip-set button{
+  background:none;border:0;color:var(--live);cursor:pointer;
+  font-family:var(--fm);font-size:11px;text-transform:uppercase;
+  letter-spacing:.08em;padding:0;margin-left:10px;
+}
+.trip-set button:hover{text-decoration:underline}
+
 .challenge{margin-top:12px}
 .challenge-note{
   margin-top:8px; font-size:12px; line-height:1.5; color:var(--dim);
@@ -490,15 +532,18 @@ pre .p{color:var(--dead)}
     <aside class="rail">
       <div class="block">
         <div class="eyebrow">Your trip</div>
-        <div class="pair">
-          <label><span>From</span><input type="text" id="origin" value="PIT" maxlength="4" placeholder="PIT" autocomplete="off"></label>
-          <label><span>To</span><input type="text" id="dest" value="BOS" maxlength="4" placeholder="BOS" autocomplete="off"></label>
-          <label><span>Date</span><input type="date" id="date"></label>
-          <label><span>Time (UTC)</span><input type="time" id="time" value="13:00"></label>
+        <div class="chat">
+          <div class="chat-log" id="chatLog"></div>
+          <div class="chat-input-row">
+            <input type="text" id="chatInput" placeholder="e.g. Pittsburgh to Boston tomorrow afternoon" autocomplete="off">
+            <button type="button" id="chatSend">Send</button>
+          </div>
         </div>
-        <div class="horizon" id="horizon">Turbulence forecasts and pilot
-          reports reach about six hours ahead. A departure beyond that is
-          answered about the air now, and usually reads unresolved.</div>
+        <div id="tripSet" class="trip-set" hidden></div>
+        <div class="horizon" id="horizon" hidden>Turbulence forecasts and
+          pilot reports reach about six hours ahead. A departure beyond
+          that is answered about the air now, and usually reads
+          unresolved.</div>
         <div class="toggles">
           <label class="toggle"><input type="checkbox" id="turbulence" checked>
             Look up turbulence along the route</label>
@@ -509,7 +554,7 @@ pre .p{color:var(--dead)}
           <label class="toggle"><input type="checkbox" id="fixtures">
             Replay saved data instead of calling live</label>
         </div>
-        <button class="go" id="go">Search corridors</button>
+        <button class="go" id="go" disabled>Tell the assistant your trip first</button>
         <!-- Rendered only when the server says Turnstile is configured, so
              a development instance is not blocked by a widget that has no
              site key to talk to. -->
@@ -1092,13 +1137,13 @@ document.querySelectorAll('.tab').forEach(tab => {
 });
 
 async function run(){
+  if(!trip) return;
   const btn = $('go');
   btn.disabled = true; btn.textContent = 'Searching…';
   document.querySelectorAll('.err').forEach(e => e.remove());
 
   const body = {
-    origin: $('origin').value.trim().toUpperCase(),
-    dest: $('dest').value.trim().toUpperCase(),
+    origin: trip.origin, dest: trip.dest,
     beam_width: +$('beam').value, depth_limit: +$('depth').value,
     max_tool_calls: +$('calls').value, width_nm: +$('width').value,
     use_graph: $('graph').checked, use_fixtures: $('fixtures').checked,
@@ -1106,8 +1151,8 @@ async function run(){
     include_turbulence: $('turbulence').checked,
     include_explanation: $('explanation').checked,
   };
-  if($('date').value) body.departure_date = $('date').value;
-  if($('time').value) body.departure_time = $('time').value;
+  if(trip.departure_date) body.departure_date = trip.departure_date;
+  if(trip.departure_time) body.departure_time = trip.departure_time;
   if(turnstileToken) body.turnstile_token = turnstileToken;
 
   try{
@@ -1150,8 +1195,6 @@ if(!(() => { try{ return localStorage.getItem('corridor-theme'); }catch(e){ retu
 }
 applyTheme(startTheme, false);
 
-$('date').value = new Date().toISOString().slice(0,10);
-
 //: Six, matching FORECAST_HORIZON_HOURS in service.py. The agent already
 //: says this at the end of a search; saying it before one is cheaper for
 //: the reader and for the metered API.
@@ -1162,8 +1205,9 @@ const HORIZON_DEFAULT = 'Turbulence forecasts and pilot reports reach about '
 
 function updateHorizon(){
   const note = $('horizon');
-  if(!note) return;
-  const d = $('date').value, t = $('time').value;
+  if(!note || !trip) return;
+  const d = trip.departure_date, t = trip.departure_time;
+  note.hidden = false;
   const when = (d && t) ? new Date(`${d}T${t}:00Z`) : null;
   if(!when || isNaN(when)){
     note.classList.remove('beyond');
@@ -1185,12 +1229,105 @@ function updateHorizon(){
   }
 }
 
-['date','time'].forEach(id => $(id).addEventListener('input', updateHorizon));
-updateHorizon();
-
 $('go').addEventListener('click', run);
-['origin','dest'].forEach(id => $(id).addEventListener('keydown',
-  e => { if(e.key === 'Enter') run(); }));
+
+/* ------------------------------------------------------------- trip chat
+   Replaces the four-field form. `chatHistory` is the whole conversation,
+   oldest first, resent in full on every turn - the endpoint keeps no
+   state of its own. `trip` is null until the assistant has a resolved,
+   distinct origin and destination; run() refuses to fire without it. */
+let chatHistory = [];
+let trip = null;
+
+function addChatMsg(role, text, cls){
+  const log = $('chatLog');
+  const div = document.createElement('div');
+  div.className = `chat-msg ${role}${cls ? ' ' + cls : ''}`;
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function renderTripSet(){
+  const box = $('tripSet');
+  if(!trip){ box.hidden = true; return; }
+  box.hidden = false;
+  const when = [trip.departure_date, trip.departure_time]
+    .filter(Boolean).join(' ');
+  box.innerHTML = `Trip set: <b>${esc(trip.origin)} → ${esc(trip.dest)}</b>`
+    + (when ? ` &middot; ${esc(when)} UTC` : '')
+    + `<button type="button" id="tripEdit">change</button>`;
+  $('tripEdit').addEventListener('click', () => {
+    trip = null;
+    renderTripSet();
+    $('go').disabled = true;
+    $('go').textContent = 'Tell the assistant your trip first';
+    $('horizon').hidden = true;
+    addChatMsg('assistant', 'What’s the new trip?', 'note');
+    $('chatInput').focus();
+  });
+}
+
+async function sendChat(){
+  const input = $('chatInput');
+  const text = input.value.trim();
+  if(!text) return;
+  input.value = '';
+  addChatMsg('user', text);
+  chatHistory.push({role: 'user', content: text});
+
+  const sendBtn = $('chatSend');
+  input.disabled = true; sendBtn.disabled = true;
+  const pending = document.createElement('div');
+  pending.className = 'chat-msg pending';
+  pending.textContent = 'thinking…';
+  $('chatLog').appendChild(pending);
+  $('chatLog').scrollTop = $('chatLog').scrollHeight;
+
+  try{
+    const payload = {messages: chatHistory};
+    if(turnstileToken) payload.turnstile_token = turnstileToken;
+    const res = await fetch('/api/chat/trip', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)});
+    const data = await res.json();
+    resetChallenge();
+    pending.remove();
+    if(!res.ok) throw new Error(
+      typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail));
+
+    if(data.reply){
+      addChatMsg('assistant', data.reply);
+      chatHistory.push({role: 'assistant', content: data.reply});
+    }
+    (data.notes || []).forEach(n => {
+      if(n !== data.reply) addChatMsg('assistant', n, 'note');
+    });
+
+    if(data.complete && data.trip){
+      trip = data.trip;
+      renderTripSet();
+      updateHorizon();
+      $('go').disabled = false;
+      $('go').textContent = 'Search corridors';
+    }
+  }catch(err){
+    pending.remove();
+    addChatMsg('assistant',
+      err.message || 'That could not be sent. Try again.', 'note');
+  }finally{
+    input.disabled = false; sendBtn.disabled = false;
+    input.focus();
+  }
+}
+
+$('chatSend').addEventListener('click', sendChat);
+$('chatInput').addEventListener('keydown',
+  e => { if(e.key === 'Enter') sendChat(); });
+
+addChatMsg('assistant',
+  'Where are you flying, and when? For example: "Pittsburgh to Boston '
+  + 'tomorrow around 2pm."');
 </script>
 </body>
 </html>

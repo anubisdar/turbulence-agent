@@ -47,6 +47,7 @@ from app.web.service import (
     run_corridor_search,
     run_reputation_search,
 )
+from app.web.tripchat import respond as trip_respond
 
 API_TITLE = "Turbulence-aware flight ranking agent"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -67,6 +68,13 @@ PUBLIC = os.environ.get("TURBULENCE_PUBLIC", "").lower() in ("1", "true", "yes")
 #: turn one request into real money.
 PUBLIC_MAX_TOOL_CALLS = 16
 PUBLIC_MAX_SECONDS = 60.0
+
+#: The trip chat spends a language-model call per turn rather than a
+#: metered flight-data call, but an anonymous caller who never intends to
+#: search can still run the conversation up indefinitely. Capped
+#: separately from the corridor search's own ceilings because it is a
+#: different budget being protected.
+PUBLIC_MAX_CHAT_MESSAGES = 12
 
 
 def _fail(exc: Exception, status: int = 500) -> HTTPException:
@@ -259,6 +267,28 @@ class CorridorSearchBody(BaseModel):
             include_turbulence=self.include_turbulence,
             include_explanation=self.include_explanation,
         )
+
+
+class TripChatMessage(BaseModel):
+    role: str = Field(pattern=r"^(user|assistant)$")
+    # A trip fits in a sentence or two. The ceiling exists so a caller
+    # cannot use this as a general-purpose, unmetered chat completion
+    # endpoint wearing this one's name.
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class TripChatBody(BaseModel):
+    #: Oldest first, ending with the user's latest turn. The page owns
+    #: replaying this; nothing is kept here between requests.
+    messages: list[TripChatMessage] = Field(min_length=1, max_length=40)
+    turnstile_token: str | None = Field(None, max_length=2048)
+
+    def clamped(self) -> "TripChatBody":
+        if not PUBLIC or len(self.messages) <= PUBLIC_MAX_CHAT_MESSAGES:
+            return self
+        return self.model_copy(update={
+            "messages": self.messages[-PUBLIC_MAX_CHAT_MESSAGES:],
+        })
 
 
 # ------------------------------------------------------------------ routes
@@ -512,6 +542,45 @@ def corridor_search(body: CorridorSearchBody, request: Request,
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
         raise _fail(e)
+
+
+@app.post("/api/chat/trip", tags=["chat"])
+def chat_trip(body: TripChatBody, request: Request, response: Response
+             ) -> dict:
+    """Advance the trip conversation by one turn.
+
+    Replaces the four-field form's job, nothing else: this never touches
+    AeroAPI and never spends a metered flight-data call. It costs one
+    language-model call per turn, which is why it sits behind the same
+    human check as the search itself rather than being left open - an
+    anonymous caller looping this is a smaller bill than a corridor
+    search, but it is not a free one.
+
+    Stateless. The caller (the page) holds the conversation and resends
+    it whole each turn; nothing is kept here between requests.
+    """
+    _require_human(request, response, body.turnstile_token)
+
+    history = [{"role": m.role, "content": m.content}
+              for m in body.clamped().messages]
+    try:
+        result = trip_respond(history)
+    except Exception as e:  # noqa: BLE001
+        raise _fail(e)
+
+    return {
+        "reply": result.reply,
+        "complete": result.complete,
+        "trip": result.trip,
+        "resolution": {
+            "origin": result.origin_resolution.note()
+                      if result.origin_resolution else None,
+            "dest": result.dest_resolution.note()
+                   if result.dest_resolution else None,
+        },
+        "notes": result.notes,
+        "source": result.source,
+    }
 
 
 @app.get("/api/search/reputation", tags=["reputation"])
