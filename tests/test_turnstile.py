@@ -267,6 +267,7 @@ class TestChallengeTelemetry:
         counted from search_runs. A timer ingests them into their own
         table, which carries the same window as everything else."""
         import sqlite3
+        from datetime import datetime, timedelta, timezone
 
         from app.edge_events import (
             CHALLENGE_REFUSAL,
@@ -278,8 +279,18 @@ class TestChallengeTelemetry:
 
         conn = sqlite3.connect(":memory:")
         init_edge_events(conn)
+        # `summary()` filters on an exact instant - now minus the retention
+        # window, to the second - not a calendar day. A fixed date literal
+        # a fixed number of days back is therefore a race against the
+        # clock: it passes only while "today" is early enough in the day
+        # that the cutoff hasn't yet moved past that literal's midnight,
+        # and starts failing, with nothing in this codebase having
+        # changed, once it has. A day comfortably inside the window sidesteps
+        # the boundary instead of gambling on it.
+        recent = (datetime.now(timezone.utc)
+                 - timedelta(days=1)).isoformat()
         record_events(conn, [{
-            "occurred_at": "2026-08-24T00:00:00+00:00",
+            "occurred_at": recent,
             "kind": CHALLENGE_REFUSAL, "detail": "presented no token",
             "dedup_key": dedup_key(CHALLENGE_REFUSAL, "a")}])
         assert summary(conn)["refusals"] == [
@@ -290,6 +301,7 @@ class TestChallengeTelemetry:
         what an automated client looks like. Merging them would hide the
         signal worth having."""
         import sqlite3
+        from datetime import datetime, timedelta, timezone
 
         from app.edge_events import (
             CHALLENGE_REFUSAL,
@@ -301,11 +313,14 @@ class TestChallengeTelemetry:
 
         conn = sqlite3.connect(":memory:")
         init_edge_events(conn)
+        # Same reasoning as above: a day well inside the window, not a
+        # fixed calendar date that ages toward the boundary.
+        first = datetime.now(timezone.utc) - timedelta(days=1)
         record_events(conn, [
-            {"occurred_at": "2026-08-24T00:00:00+00:00",
+            {"occurred_at": first.isoformat(),
              "kind": CHALLENGE_REFUSAL, "detail": "presented no token",
              "dedup_key": dedup_key(CHALLENGE_REFUSAL, "a")},
-            {"occurred_at": "2026-08-24T00:01:00+00:00",
+            {"occurred_at": (first + timedelta(minutes=1)).isoformat(),
              "kind": CHALLENGE_REFUSAL,
              "detail": "presented one that failed",
              "dedup_key": dedup_key(CHALLENGE_REFUSAL, "b")}])
