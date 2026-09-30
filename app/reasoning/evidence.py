@@ -140,6 +140,12 @@ class ObservedEvidence:
     #: who wants to know whether the rough air is early or late in the
     #: flight rather than merely that it exists.
     worst_at: str | None = None
+    #: True when reports inside the corridor gave more than one severity -
+    #: three light and one severe, say. A single number (the worst) already
+    #: carries this into the reading; a caller deciding whether the route is
+    #: uniform along its length needs the disagreement itself, not just its
+    #: resolution.
+    mixed_severity: bool = False
 
 
 @dataclass
@@ -155,6 +161,21 @@ class GatherResult:
     #: whenever the reading is unresolved, because "unresolved" on its own
     #: tells a nervous passenger nothing about why.
     summary: str | None = None
+    #: The forecast polygons that actually matched this shape - not just
+    #: how many, but which ones - so a caller can re-test them against a
+    #: smaller shape (half of this corridor, say) without a second fetch.
+    matched_advisories: list = field(default_factory=list)
+    #: True when pilot reports inside this shape disagreed with each other.
+    #: See `ObservedEvidence.mixed_severity`.
+    observed_mixed: bool = False
+    #: The raw reports and advisories this result was computed from, kept
+    #: so a geographically smaller shape can be re-evaluated against the
+    #: same fetch - see `evidence_from_raw`. Empty when nothing was fetched,
+    #: same as an empty result from a real fetch; a caller relying on this
+    #: for reuse already knows fetching was attempted, from the evidence
+    #: that triggered the reuse in the first place.
+    raw_reports: list = field(default_factory=list)
+    raw_advisories: list = field(default_factory=list)
 
 
 # ------------------------------------------------------------------ helpers
@@ -337,7 +358,8 @@ def gather_observed(shape: CorridorShape, reports: Iterable,
     return ObservedEvidence(
         reading=worst_reading, count=count, mean_age_minutes=mean_age,
         coverage=cov, notes=notes, inside=len(inside_points),
-        considered=considered, worst_at=worst_where)
+        considered=considered, worst_at=worst_where,
+        mixed_severity=len({r.value for r in readings}) > 1)
 
 
 def _flight_level(feet: int | None) -> str:
@@ -402,8 +424,16 @@ def _describe_vertical_miss(near_miss: Sequence[TurbulenceAdvisory],
 
 def gather_forecast(shape: CorridorShape,
                     advisories: Sequence[TurbulenceAdvisory],
-                    ) -> tuple[Severity, int, list[str], int, int]:
-    """Forecast polygons overlapping the corridor in three dimensions."""
+                    ) -> tuple[Severity, int, list[str], int, int,
+                              list[TurbulenceAdvisory]]:
+    """Forecast polygons overlapping the corridor in three dimensions.
+
+    The matched advisories are returned alongside the reading, not just
+    counted, so a caller deciding whether a forecast covers the whole
+    corridor or only part of it can re-test the same polygons against a
+    smaller shape - a longitudinal split, say - without fetching anything
+    again.
+    """
     considered = len(advisories or [])
     matched: list[TurbulenceAdvisory] = []
     notes: list[str] = []
@@ -448,7 +478,7 @@ def gather_forecast(shape: CorridorShape,
             f"({bands}), worst {reading.value}."
         )
 
-    return reading, len(matched), notes, len(matched), considered
+    return reading, len(matched), notes, len(matched), considered, matched
 
 
 #: A route shorter than this rarely climbs high enough, or stays at cruise
@@ -599,49 +629,35 @@ def explain_reading(evidence: Evidence, shape: CorridorShape) -> str:
     return " ".join(p for p in parts if p)
 
 
-def gather_evidence(shape: CorridorShape,
-                    fetch_pireps: PirepFetcher | None = None,
-                    gairmet_client: GairmetClient | None = None,
-                    when: datetime | None = None,
-                    lookback_hours: int = DEFAULT_LOOKBACK_HOURS,
-                    ) -> GatherResult:
-    """Evidence for one corridor, from both sources, held apart.
+def evidence_from_raw(shape: CorridorShape,
+                      reports: Sequence[object],
+                      advisories: Sequence[TurbulenceAdvisory],
+                      now: datetime,
+                      attempted: bool = True) -> GatherResult:
+    """Evidence for a shape from reports and advisories already in hand.
 
-    Either source failing leaves its half unresolved and says so. A gap in
-    one source never becomes a reading in the other.
+    The pure half of `gather_evidence`: no network call, no failure mode of
+    its own - whatever fetching was going to fail already failed, or
+    already succeeded, before this runs. That is what lets a geographically
+    smaller shape - one half of a corridor already searched - be
+    re-evaluated against data fetched for its parent, at no additional cost.
+
+    `attempted` mirrors `fetch_pireps is not None` in `gather_evidence`: it
+    exists only to tell an empty `coverage_fraction` apart from a `None`
+    one, and a caller reusing a parent's data already knows fetching was
+    attempted, because the parent's own evidence is what decided to reuse
+    it.
     """
-    now = when or datetime.now(timezone.utc)
     notes: list[str] = []
 
-    # ---- observed
-    reports: Sequence[object] = []
-    if fetch_pireps is not None:
-        try:
-            reports = fetch_pireps(bounding_box(shape), lookback_hours) or []
-        except Exception as e:  # noqa: BLE001 - one source failing is not fatal
-            notes.append(
-                f"Pilot reports could not be fetched ({type(e).__name__}). "
-                f"The observed side is unknown, not clear."
-            )
     observed = gather_observed(shape, reports, now)
     obs_reading, obs_count = observed.reading, observed.count
     mean_age, cov = observed.mean_age_minutes, observed.coverage
     inside, considered = observed.inside, observed.considered
     notes.extend(observed.notes)
 
-    # ---- forecast
-    advisories: Sequence[TurbulenceAdvisory] = []
-    if gairmet_client is not None:
-        try:
-            advisories = [a for a in gairmet_client.fetch()
-                          if a.valid_at(now)]
-        except GairmetFetchError as e:
-            notes.append(
-                f"Turbulence forecasts could not be fetched ({e}). The "
-                f"forecast side is unknown, not clear."
-            )
-    (fc_reading, fc_count, fc_notes,
-     fc_inside, fc_considered) = gather_forecast(shape, advisories)
+    (fc_reading, fc_count, fc_notes, fc_inside, fc_considered,
+     matched) = gather_forecast(shape, advisories)
     notes.extend(fc_notes)
 
     # ---- combine, without blending
@@ -663,7 +679,7 @@ def gather_evidence(shape: CorridorShape,
         notes.append(f"{summary} Unresolved is not smooth.")
 
     evidence = Evidence(
-        coverage_fraction=cov if fetch_pireps is not None else None,
+        coverage_fraction=cov if attempted else None,
         mean_age_minutes=mean_age,
         agreement=None,                 # the critic computes this
         reading=combined,
@@ -682,7 +698,52 @@ def gather_evidence(shape: CorridorShape,
         evidence=evidence, notes=notes, summary=summary,
         reports_inside=inside, reports_considered=considered,
         advisories_inside=fc_inside, advisories_considered=fc_considered,
+        matched_advisories=matched, observed_mixed=observed.mixed_severity,
+        raw_reports=list(reports or []), raw_advisories=list(advisories or []),
     )
+
+
+def gather_evidence(shape: CorridorShape,
+                    fetch_pireps: PirepFetcher | None = None,
+                    gairmet_client: GairmetClient | None = None,
+                    when: datetime | None = None,
+                    lookback_hours: int = DEFAULT_LOOKBACK_HOURS,
+                    ) -> GatherResult:
+    """Evidence for one corridor, from both sources, held apart.
+
+    Either source failing leaves its half unresolved and says so. A gap in
+    one source never becomes a reading in the other.
+    """
+    now = when or datetime.now(timezone.utc)
+    fetch_notes: list[str] = []
+
+    # ---- observed
+    reports: Sequence[object] = []
+    if fetch_pireps is not None:
+        try:
+            reports = fetch_pireps(bounding_box(shape), lookback_hours) or []
+        except Exception as e:  # noqa: BLE001 - one source failing is not fatal
+            fetch_notes.append(
+                f"Pilot reports could not be fetched ({type(e).__name__}). "
+                f"The observed side is unknown, not clear."
+            )
+
+    # ---- forecast
+    advisories: Sequence[TurbulenceAdvisory] = []
+    if gairmet_client is not None:
+        try:
+            advisories = [a for a in gairmet_client.fetch()
+                          if a.valid_at(now)]
+        except GairmetFetchError as e:
+            fetch_notes.append(
+                f"Turbulence forecasts could not be fetched ({e}). The "
+                f"forecast side is unknown, not clear."
+            )
+
+    result = evidence_from_raw(shape, reports, advisories, now,
+                               attempted=fetch_pireps is not None)
+    result.notes = fetch_notes + result.notes
+    return result
 
 
 # ------------------------------------------------------------------ async

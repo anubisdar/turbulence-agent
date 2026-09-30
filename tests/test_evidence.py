@@ -12,6 +12,7 @@ from app.reasoning.critic import Corridor, Evidence, Geometry, Provenance, Sever
 from app.reasoning.evidence import (
     bounding_box,
     coverage_fraction,
+    evidence_from_raw,
     gather_evidence,
     gather_forecast,
     gather_observed,
@@ -197,7 +198,7 @@ class TestForecastGathering:
         """The bug this test exists for: a G-AIRMET is usually far larger
         than a 25 nm corridor, so a polygon covering the whole route has
         every vertex outside it. Vertex containment would miss it."""
-        reading, count, _, _, _ = gather_forecast(shape, [advisory(wide_ring())])
+        reading, count, _, _, _, _ = gather_forecast(shape, [advisory(wide_ring())])
         assert count == 1
         assert reading is Severity.MODERATE
 
@@ -208,7 +209,7 @@ class TestForecastGathering:
 
     def test_a_polygon_at_a_different_altitude_does_not_match(self, shape):
         low = advisory(wide_ring(), base="SFC", top="180")
-        reading, count, notes, _, _ = gather_forecast(shape, [low])
+        reading, count, notes, _, _, _ = gather_forecast(shape, [low])
         assert count == 0
         assert reading is Severity.UNRESOLVED
         assert any("not a forecast of smooth air" in n for n in notes)
@@ -216,18 +217,18 @@ class TestForecastGathering:
     def test_a_distant_polygon_does_not_match(self, shape):
         far = advisory([(25.0, -80.0), (26.0, -80.0), (26.0, -81.0),
                         (25.0, -81.0)])
-        _, count, _, _, _ = gather_forecast(shape, [far])
+        _, count, _, _, _, _ = gather_forecast(shape, [far])
         assert count == 0
 
     def test_the_worst_overlapping_forecast_wins(self, shape):
         mild = advisory(wide_ring(), severity="LGT")
         harsh = advisory(wide_ring(), severity="SEV")
-        reading, count, _, _, _ = gather_forecast(shape, [mild, harsh])
+        reading, count, _, _, _, _ = gather_forecast(shape, [mild, harsh])
         assert reading is Severity.SEVERE
         assert count == 2
 
     def test_no_forecasts_at_all(self, shape):
-        reading, count, _, _, _ = gather_forecast(shape, [])
+        reading, count, _, _, _, _ = gather_forecast(shape, [])
         assert reading is Severity.UNRESOLVED
         assert count == 0
 
@@ -288,6 +289,82 @@ class TestSourcesHeldApart:
                            reports=[FakeReport(PATH[10], 34000, "moderate")],
                            advisories=["MOD"])
         assert not res.evidence.sources_disagree
+
+
+class TestEvidenceFromRaw:
+    """The pure combine step `gather_evidence` delegates to, and that a
+    split corridor's children call directly against their parent's
+    already-fetched data - no fetcher, no network, just the two lists."""
+
+    def _advisories(self, severities):
+        return [advisory(wide_ring(), sev) for sev in severities]
+
+    def test_matches_gather_evidence_given_the_same_data(self, shape):
+        reports = [FakeReport(PATH[10], 34000, "light")]
+        advisories = self._advisories(["MOD"])
+
+        via_gather = gather_evidence(
+            shape, fetch_pireps=lambda b, h: reports,
+            gairmet_client=GairmetClient(
+                transport=lambda p, q: (200, [], "")),
+            when=NOW)
+        # gather_evidence only reaches the gairmet client through fetch(),
+        # so hand the advisories straight to the pure function it wraps -
+        # this test is about the two paths agreeing on the combine logic,
+        # not re-plumbing a fake transport.
+        direct = evidence_from_raw(shape, reports, advisories, NOW)
+
+        assert direct.evidence.observed_reading == Severity.LIGHT
+        assert direct.evidence.forecast_reading == Severity.MODERATE
+        assert direct.evidence.reading == Severity.MODERATE
+        assert via_gather.evidence.observed_reading == Severity.LIGHT
+
+    def test_attempted_false_means_no_coverage_fraction(self, shape):
+        result = evidence_from_raw(shape, [], [], NOW, attempted=False)
+        assert result.evidence.coverage_fraction is None
+
+    def test_attempted_true_means_a_coverage_fraction_is_computed(self, shape):
+        reports = [FakeReport(PATH[10], 34000, "light")]
+        result = evidence_from_raw(shape, reports, [], NOW, attempted=True)
+        assert result.evidence.coverage_fraction is not None
+
+    def test_a_smaller_shape_sees_only_its_own_reports(self):
+        first_half = build_corridor(PATH[:12], altitude_min_ft=31300,
+                                    altitude_max_ft=35000)
+        second_half = build_corridor(PATH[12:], altitude_min_ft=31300,
+                                     altitude_max_ft=35000)
+        reports = [FakeReport(PATH[2], 34000, "light"),
+                  FakeReport(PATH[20], 34000, "severe")]
+
+        first = evidence_from_raw(first_half, reports, [], NOW)
+        second = evidence_from_raw(second_half, reports, [], NOW)
+
+        assert first.evidence.observed_reading == Severity.LIGHT
+        assert second.evidence.observed_reading == Severity.SEVERE
+
+    def test_the_raw_inputs_are_carried_in_the_result(self, shape):
+        reports = [FakeReport(PATH[10], 34000, "light")]
+        advisories = self._advisories(["MOD"])
+        result = evidence_from_raw(shape, reports, advisories, NOW)
+        assert result.raw_reports == list(reports)
+        assert result.raw_advisories == list(advisories)
+
+    def test_observed_mixed_propagates_from_disagreeing_reports(self, shape):
+        reports = [FakeReport(PATH[9], 34000, "light"),
+                  FakeReport(PATH[11], 34000, "severe")]
+        result = evidence_from_raw(shape, reports, [], NOW)
+        assert result.observed_mixed is True
+
+    def test_observed_mixed_is_false_when_reports_agree(self, shape):
+        reports = [FakeReport(PATH[9], 34000, "light"),
+                  FakeReport(PATH[11], 34000, "light")]
+        result = evidence_from_raw(shape, reports, [], NOW)
+        assert result.observed_mixed is False
+
+    def test_no_reports_or_advisories_leaves_it_unresolved(self, shape):
+        result = evidence_from_raw(shape, [], [], NOW)
+        assert result.evidence.reading is Severity.UNRESOLVED
+        assert result.summary is not None
 
 
 class TestCriticComputesAgreement:

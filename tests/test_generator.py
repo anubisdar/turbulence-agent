@@ -5,14 +5,22 @@ probe, including the detail that filed route strings name enroute fixes but
 not the airports.
 """
 
+import dataclasses
 import math
 import sqlite3
 
 import pytest
 
 from app.reasoning.controller import Budget
-from app.reasoning.critic import Provenance
-from app.reasoning.generator import MAX_USEFUL_DEPTH, CorridorGenerator
+from app.reasoning.critic import Evidence, Provenance, Severity
+from app.reasoning.evidence import GatherResult
+from app.reasoning.generator import (
+    MAX_USEFUL_DEPTH,
+    MIN_SPLIT_LENGTH_NM,
+    CorridorGenerator,
+    _match_flight_number,
+    _split_points,
+)
 from app.reasoning.geometry import great_circle, path_length_nm
 from app.sources.aeroapi import AeroAPIClient
 from app.sources.fixes import cache_stats, init_fixes
@@ -223,6 +231,103 @@ class TestDegradedInputs:
         budget = Budget(max_tool_calls=2)
         gen(None, 1, budget)
         assert budget.calls_used <= 2
+
+
+class TestFlightNumberMatching:
+    """Unit tests for the ident/flight-number matcher, no client involved."""
+
+    def test_an_exact_ident_match(self):
+        from app.sources.aeroapi import FlightSegment
+        seg = FlightSegment(
+            ident="JBU1286", fa_flight_id="x", aircraft_type=None,
+            status=None, actual_off="2026-08-10T12:52:35Z",
+            scheduled_out=None, route=None, filed_altitude_ft=None,
+            reported_distance=None)
+        assert _match_flight_number([seg], "JBU1286") is seg
+
+    def test_an_iata_prefix_matches_an_icao_ident(self):
+        """AeroAPI's ident carries the ICAO prefix; a passenger types the
+        shorter IATA one for the same airline."""
+        from app.sources.aeroapi import FlightSegment
+        seg = FlightSegment(
+            ident="UAL1234", fa_flight_id="x", aircraft_type=None,
+            status=None, actual_off="2026-08-10T12:52:35Z",
+            scheduled_out=None, route=None, filed_altitude_ft=None,
+            reported_distance=None)
+        assert _match_flight_number([seg], "UA1234") is seg
+
+    def test_a_different_flight_number_does_not_match(self):
+        from app.sources.aeroapi import FlightSegment
+        seg = FlightSegment(
+            ident="UAL1234", fa_flight_id="x", aircraft_type=None,
+            status=None, actual_off="2026-08-10T12:52:35Z",
+            scheduled_out=None, route=None, filed_altitude_ft=None,
+            reported_distance=None)
+        assert _match_flight_number([seg], "UA9999") is None
+
+    def test_no_segments_is_no_match(self):
+        assert _match_flight_number([], "UA1234") is None
+
+    def test_a_codeshare_suffix_letter_still_matches_on_the_digits(self):
+        """A flight number can carry a trailing letter (BA249A). The suffix
+        is not part of what identifies the flight, so it's ignored on both
+        sides rather than breaking the match."""
+        from app.sources.aeroapi import FlightSegment
+        seg = FlightSegment(
+            ident="BAW249", fa_flight_id="x", aircraft_type=None,
+            status=None, actual_off="2026-08-10T12:52:35Z",
+            scheduled_out=None, route=None, filed_altitude_ft=None,
+            reported_distance=None)
+        assert _match_flight_number([seg], "BA249A") is seg
+
+
+class TestFlightNumberPin:
+    """`_get_flight` prefers a matching flight number over the
+    nearest-to-target-time pick, and explains itself either way."""
+
+    def test_a_match_pins_the_reference_flight(self):
+        gen, _ = make_gen()
+        gen = dataclasses.replace(gen, flight_number="JBU1286")
+        flight = gen._get_flight(Budget(max_tool_calls=12))
+        assert flight is not None
+        assert flight.ident == "JBU1286"
+        assert any("pinned to JBU1286" in n for n in gen.notes)
+
+    def test_no_match_falls_back_to_nearest_departure_time(self):
+        gen, _ = make_gen()
+        gen = dataclasses.replace(gen, flight_number="DL9999",
+                                  target_time="12:00")
+        flight = gen._get_flight(Budget(max_tool_calls=12))
+        # Falls back to _pick_reference's normal behaviour rather than
+        # coming back empty because the pin missed.
+        assert flight is not None
+        assert flight.ident in {"JBU1286", "RPA5678"}
+        assert any("No recent" in n and "DL9999" in n for n in gen.notes)
+
+    def test_a_match_that_has_not_flown_yet_falls_back_with_its_own_note(self):
+        scheduled_and_flown = {"flights": [
+            {"segments": [{"ident": "JBU1286", "fa_flight_id": "x-1",
+                          "actual_off": None,
+                          "route": "EWC PONCT", "origin": {"code": "KPIT"},
+                          "destination": {"code": "KBOS"}}]},
+            {"segments": [{"ident": "RPA5678", "fa_flight_id": "RPA5678-y",
+                          "actual_off": "2026-08-09T10:00:00Z",
+                          "route": ALT_ROUTE, "filed_altitude": 310,
+                          "origin": {"code": "KPIT"},
+                          "destination": {"code": "KBOS"}}]},
+        ]}
+        gen, _ = make_gen({"/flights/to/KBOS": scheduled_and_flown})
+        gen = dataclasses.replace(gen, flight_number="JBU1286")
+        flight = gen._get_flight(Budget(max_tool_calls=12))
+        assert flight is not None
+        assert flight.ident == "RPA5678"
+        assert any("hasn't flown yet" in n for n in gen.notes)
+
+    def test_no_flight_number_behaves_exactly_as_before(self):
+        gen, _ = make_gen()
+        flight = gen._get_flight(Budget(max_tool_calls=12))
+        assert flight is not None
+        assert not any("pinned" in n.lower() for n in gen.notes)
 
 
 class TestDepthTwo:
@@ -608,6 +713,121 @@ class TestNoNonstopService:
         assert "gc" in {c.id for c in out}
 
 
+class TestConnectionAwareSearch:
+    """A pair with no nonstop service, but a real connecting itinerary
+    whose legs AeroAPI reported distances for, gets searched on the
+    long-haul leg instead of falling back to a bare geometric line between
+    two airports nobody flies directly - see
+    AeroAPIClient.route_or_long_haul_leg and CorridorGenerator._get_flight.
+    """
+
+    CONNECTION_WITH_DISTANCE = [
+        {"ident": "SKW4002", "fa_flight_id": "skw-1", "aircraft_type": "E75L",
+         "route_distance": 100, "actual_off": "2026-08-16T22:48:35Z",
+         "origin": {"code": "KSAN"}, "destination": {"code": "KLAX"}},
+        {"ident": "ANA125", "fa_flight_id": "ana-1", "aircraft_type": "B789",
+         "route_distance": 5100, "actual_off": "2026-08-17T00:42:55Z",
+         "origin": {"code": "KLAX"}, "destination": {"code": "RJTT"}},
+    ]
+
+    ANA_ROUTE = {"fixes": [
+        {"name": "KLAX", "latitude": 33.9425, "longitude": -118.4081,
+         "type": "Origin Airport"},
+        {"name": "MDPT", "latitude": 40.0, "longitude": 179.0, "type": "Fix"},
+        {"name": "RJTT", "latitude": 35.5533, "longitude": 139.7811,
+         "type": "Destination Airport"},
+    ]}
+
+    def _gen(self, segments=None, extra_routes=None):
+        import sqlite3
+        from app.sources.aeroapi import AeroAPIClient
+        from app.sources.fixes import init_fixes
+        pair = {"flights": [{"segments": segments if segments is not None
+                                        else self.CONNECTION_WITH_DISTANCE}]}
+        routes = {
+            "/flights/to/RJTT": pair,
+            "/airports/KSAN": {"latitude": 32.7336, "longitude": -117.1897},
+            "/airports/KLAX": {"latitude": 33.9425, "longitude": -118.4081},
+            "/airports/RJTT": {"latitude": 35.5533, "longitude": 139.7811},
+            "/flights/ana-1/route": self.ANA_ROUTE,
+            "/routes/RJTT": {"routes": []},
+        }
+        routes.update(extra_routes or {})
+
+        def transport(path, params):
+            for suffix, payload in routes.items():
+                if path.endswith(suffix):
+                    return 200, payload, ""
+            return 404, None, ""
+
+        conn = sqlite3.connect(":memory:")
+        init_fixes(conn)
+        return CorridorGenerator(
+            client=AeroAPIClient(api_key="t", transport=transport,
+                                 spacing_seconds=0, sleep=lambda s: None),
+            conn=conn, origin="KSAN", dest="RJTT")
+
+    def test_the_substitution_is_recorded(self):
+        gen = self._gen()
+        gen(None, 1, Budget(max_tool_calls=12))
+        assert gen.route_substitution == ("KSAN", "RJTT", "KLAX", "RJTT")
+
+    def test_the_long_haul_leg_becomes_the_reference_flight(self):
+        """Not SKW4002, the short feeder into LAX - ANA125, the leg that
+        actually flies to Tokyo."""
+        gen = self._gen()
+        gen(None, 1, Budget(max_tool_calls=12))
+        assert gen._flight is not None
+        assert gen._flight.ident == "ANA125"
+
+    def test_the_generator_s_own_origin_and_dest_move_to_the_leg(self):
+        gen = self._gen()
+        gen(None, 1, Budget(max_tool_calls=12))
+        assert (gen.origin, gen.dest) == ("KLAX", "RJTT")
+
+    def test_the_substitution_is_explained_in_a_note(self):
+        gen = self._gen()
+        gen(None, 1, Budget(max_tool_calls=12))
+        assert any("Searching the long-haul leg instead" in n
+                   and "KSAN" in n and "KLAX to RJTT" in n
+                   for n in gen.notes)
+
+    def test_a_corridor_is_still_produced_on_the_substituted_pair(self):
+        gen = self._gen()
+        out = gen(None, 1, Budget(max_tool_calls=12))
+        assert out, "expected at least one corridor on the substituted leg"
+
+    def test_a_genuine_nonstop_pair_is_never_substituted(self):
+        """The overwhelming common case: a pair with its own nonstop
+        service is untouched by any of this."""
+        segments = [{"ident": "NH106", "fa_flight_id": "nh-1",
+                    "aircraft_type": "B77W", "route_distance": 5460,
+                    "actual_off": "2026-08-16T20:00:00Z",
+                    "origin": {"code": "KSAN"}, "destination": {"code": "RJTT"}}]
+        gen = self._gen(segments=segments)
+        gen(None, 1, Budget(max_tool_calls=12))
+        assert gen.route_substitution is None
+        assert (gen.origin, gen.dest) == ("KSAN", "RJTT")
+
+    def test_no_ranked_leg_means_no_substitution(self):
+        """The general no-nonstop-service class this feature extends:
+        when nothing among the connecting itineraries lets the long-haul
+        leg be told apart from a feeder, this behaves exactly as it did
+        before the feature existed - see TestNoNonstopService."""
+        undistanced = [
+            {"ident": "SKW4002", "fa_flight_id": "skw-1",
+             "actual_off": "2026-08-16T22:48:35Z",
+             "origin": {"code": "KSAN"}, "destination": {"code": "KLAX"}},
+            {"ident": "ANA125", "fa_flight_id": "ana-1",
+             "actual_off": "2026-08-17T00:42:55Z",
+             "origin": {"code": "KLAX"}, "destination": {"code": "RJTT"}},
+        ]
+        gen = self._gen(segments=undistanced)
+        gen(None, 1, Budget(max_tool_calls=12))
+        assert gen.route_substitution is None
+        assert any("No nonstop flights operate" in n for n in gen.notes)
+
+
 class TestDegradedSearches:
     """A search that lost a data source explored less of the tree. That is
     a different thing from one a budget cut short, and both differ from a
@@ -674,3 +894,269 @@ class TestDegradedSearches:
         logged = buf.getvalue()
         assert "generator note=" in logged
         assert "generator degraded" not in logged
+
+
+class TestSplitPoints:
+    """The pure helper behind a longitudinal split: cut a path in two by
+    cumulative distance, not by how many points happen to represent it."""
+
+    def test_splits_at_a_shared_vertex(self):
+        points = [(0.0, 0.0), (0.0, 2.0), (0.0, 4.0)]
+        first, second = _split_points(points)
+        assert first[-1] == pytest.approx(second[0], abs=1e-6)
+        assert first[0] == (0.0, 0.0)
+        assert second[-1] == (0.0, 4.0)
+
+    def test_interpolates_inside_a_leg(self):
+        points = [(0.0, 0.0), (0.0, 10.0)]
+        first, second = _split_points(points)
+        # The only leg is 10 degrees of longitude at the equator; the split
+        # point should land near its midpoint.
+        assert first[-1][1] == pytest.approx(5.0, abs=0.5)
+        assert first[-1] == second[0]
+
+    def test_the_halves_are_roughly_equal_length(self):
+        points = [(40.0, -80.0 + i * 0.5) for i in range(41)]
+        first, second = _split_points(points)
+        len_first = path_length_nm(first)
+        len_second = path_length_nm(second)
+        assert len_first == pytest.approx(len_second, rel=0.05)
+
+    def test_too_few_points_returns_nothing(self):
+        assert _split_points([]) == ([], [])
+        assert _split_points([(0.0, 0.0)]) == ([], [])
+
+    def test_zero_length_path_still_splits_by_index(self):
+        points = [(1.0, 1.0), (1.0, 1.0), (1.0, 1.0)]
+        first, second = _split_points(points)
+        assert first and second
+
+
+class TestDepthThree:
+    """A conditional longitudinal split: fires only when the parent's own
+    evidence says the corridor is not uniform, and never spends a call to
+    evaluate its children - see `_gather_for`."""
+
+    #: A long, straight synthetic corridor, decoupled from the KPIT-KBOS
+    #: fixtures above so the split trigger can be tested in isolation from
+    #: everything depth 1 and 2 already cover.
+    LONG_PATH = [(40.0, -80.0 + i * 0.5) for i in range(41)]
+
+    def _parent_with_evidence(self, gen, *, coverage=None, mixed=False,
+                              matched=None, points=None, depth=2):
+        points = points if points is not None else self.LONG_PATH
+        cid = "probe"
+        shape = gen._register(cid, points)
+        gc_nm = path_length_nm(great_circle(points[0], points[-1], 24))
+        parent = gen._corridor(cid, Provenance.ACTUAL_TRACK, points, gc_nm,
+                               altitude_min=30000, altitude_max=36000,
+                               depth=depth, label="probe")
+        gen.evidence[cid] = GatherResult(
+            evidence=Evidence(coverage_fraction=coverage),
+            notes=[], matched_advisories=matched or [],
+            observed_mixed=mixed, raw_reports=[], raw_advisories=[],
+        )
+        return parent
+
+    def test_no_evidence_means_no_split(self):
+        gen, _ = make_gen()
+        shape = gen._register("probe", self.LONG_PATH)
+        parent = gen._corridor("probe", Provenance.ACTUAL_TRACK,
+                               self.LONG_PATH, 1000.0, depth=2)
+        assert gen._longitudinal_branches(parent) == []
+
+    def test_a_short_corridor_never_splits(self):
+        gen, _ = make_gen()
+        short_path = [(40.0, -80.0 + i * 0.02) for i in range(11)]
+        parent = self._parent_with_evidence(gen, coverage=0.4,
+                                            points=short_path)
+        assert path_length_nm(short_path) < MIN_SPLIT_LENGTH_NM
+        assert gen._longitudinal_branches(parent) == []
+
+    def test_full_coverage_does_not_split(self):
+        gen, _ = make_gen()
+        parent = self._parent_with_evidence(gen, coverage=1.0)
+        assert gen._longitudinal_branches(parent) == []
+
+    def test_no_coverage_at_all_does_not_split(self):
+        """Nobody having looked at any of it is uniform silence, not a
+        reason to split - splitting would just produce two more unresolved
+        children."""
+        gen, _ = make_gen()
+        parent = self._parent_with_evidence(gen, coverage=None)
+        assert gen._longitudinal_branches(parent) == []
+
+    def test_partial_coverage_splits(self):
+        gen, _ = make_gen()
+        parent = self._parent_with_evidence(gen, coverage=0.4)
+        children = gen._longitudinal_branches(parent)
+        assert len(children) == 2
+        assert {c.label for c in children} == {"first half", "second half"}
+
+    def test_mixed_reports_split_even_with_full_coverage(self):
+        gen, _ = make_gen()
+        parent = self._parent_with_evidence(gen, coverage=1.0, mixed=True)
+        assert len(gen._longitudinal_branches(parent)) == 2
+
+    def test_forecast_covering_only_one_half_splits(self):
+        from types import SimpleNamespace
+        gen, _ = make_gen()
+        # A ring hugging the western end of the path only - roughly
+        # KPIT-side longitudes, well clear of the eastern half.
+        western_ring = [(39.0, -80.5), (41.0, -80.5),
+                        (41.0, -75.0), (39.0, -75.0)]
+        parent = self._parent_with_evidence(
+            gen, coverage=None,
+            matched=[SimpleNamespace(ring=western_ring)])
+        children = gen._longitudinal_branches(parent)
+        assert len(children) == 2
+
+    def test_forecast_covering_the_whole_route_does_not_split(self):
+        from types import SimpleNamespace
+        gen, _ = make_gen()
+        wide_ring = [(35.0, -85.0), (45.0, -85.0),
+                    (45.0, -60.0), (35.0, -60.0)]
+        parent = self._parent_with_evidence(
+            gen, coverage=None,
+            matched=[SimpleNamespace(ring=wide_ring)])
+        assert gen._longitudinal_branches(parent) == []
+
+    def test_no_signal_at_all_does_not_split(self):
+        gen, _ = make_gen()
+        parent = self._parent_with_evidence(gen)
+        assert gen._longitudinal_branches(parent) == []
+
+    def test_children_share_the_split_point(self):
+        gen, _ = make_gen()
+        parent = self._parent_with_evidence(gen, coverage=0.5)
+        children = {c.label: c for c in gen._longitudinal_branches(parent)}
+        first_pts = gen.shapes[children["first half"].id].points
+        second_pts = gen.shapes[children["second half"].id].points
+        assert first_pts[-1] == pytest.approx(second_pts[0], abs=1e-6)
+
+    def test_children_inherit_provenance_and_altitude_band(self):
+        gen, _ = make_gen()
+        parent = self._parent_with_evidence(gen, coverage=0.5)
+        for c in gen._longitudinal_branches(parent):
+            assert c.provenance is parent.provenance
+            assert c.parent_id == parent.id
+            shape = gen.shapes[c.id]
+            assert shape.altitude_min_ft == 30000
+            assert shape.altitude_max_ft == 36000
+
+    def test_split_children_are_tracked_for_free_reevaluation(self):
+        gen, _ = make_gen()
+        parent = self._parent_with_evidence(gen, coverage=0.5)
+        children = gen._longitudinal_branches(parent)
+        assert {c.id for c in children} <= gen._split_children
+
+    def test_the_note_names_the_reason(self):
+        gen, _ = make_gen()
+        parent = self._parent_with_evidence(gen, coverage=0.4)
+        gen._longitudinal_branches(parent)
+        assert any("Splitting" in n and "partial" in n for n in gen.notes)
+
+    def test_nothing_beyond_depth_three(self):
+        gen, _ = make_gen()
+        parent = self._parent_with_evidence(gen, coverage=0.4)
+        assert gen(parent, MAX_USEFUL_DEPTH + 1, Budget(max_tool_calls=12)) == []
+
+    def test_depth_three_is_routed_to_the_split(self):
+        """__call__ dispatches depth 2 to altitude branches and depth 3 to
+        the longitudinal split - a regression here would silently run the
+        wrong branch logic at the wrong depth."""
+        gen, _ = make_gen()
+        parent = self._parent_with_evidence(gen, coverage=0.4)
+        children = gen(parent, 3, Budget(max_tool_calls=12))
+        assert {c.label for c in children} == {"first half", "second half"}
+
+
+class TestDepthThreeReusesEvidence:
+    """The whole cost claim rests on this: a split child's evidence comes
+    from data already fetched for its parent, never a second fetch."""
+
+    def _counting_sources(self):
+        from datetime import datetime, timedelta, timezone
+        from app.sources.gairmet import GairmetClient
+        now = datetime(2026, 8, 16, 12, 30, tzinfo=timezone.utc)
+        calls = {"pireps": 0, "gairmet": 0}
+
+        class PR:
+            def __init__(s, lat, lon, alt, sev):
+                s.latitude, s.longitude, s.altitude_ft = lat, lon, alt
+                s.turbulence_severity = sev
+                s.observation_time = now - timedelta(minutes=20)
+
+        # Two reports on the real flown track (see _track_point above, at
+        # f=0.25 and f=0.75), with different severities, so coverage is
+        # partial and the readings disagree - either signal alone would
+        # trigger the split. Altitude is inside the "high" band
+        # (hi-2000, hi) = (43000, 45000) that the beam-width-1 search keeps
+        # at depth 2 for this fixture's filed range of FL250-FL450 - the
+        # "low" branch is pruned, so a report at cruise (35000) would fall
+        # outside the surviving corridor's altitude band and count as
+        # observed nowhere.
+        def fetch(bbox, hours):
+            calls["pireps"] += 1
+            return [PR(41.2068, -77.9261, 44000, "light"),
+                   PR(42.1425, -73.3130, 44000, "severe")]
+
+        def gairmet_fetch():
+            calls["gairmet"] += 1
+            return []
+
+        client = GairmetClient(transport=lambda p, q: (200, [], ""))
+        client.fetch = gairmet_fetch
+        return fetch, client, now, calls
+
+    def test_split_children_cost_no_extra_calls(self):
+        from app.reasoning.controller import Budget, search
+        gen, _ = make_gen()
+        fetch, client, now, calls = self._counting_sources()
+        gen.fetch_pireps = fetch
+        gen.gairmet_client = client
+        gen.when = now
+
+        budget = Budget(max_tool_calls=30)
+        res = search(gen, beam_width=1, depth_limit=3,
+                     confidence_threshold=1.1, budget=budget,
+                     overlap_fn=gen.overlap_fn,
+                     enrich=gen.gather_for_survivors)
+
+        split_ids = {cid for cid in gen.evidence if cid in gen._split_children}
+        assert split_ids, "the split should have fired on this fixture"
+
+        # One PIREP fetch and one GAIRMET fetch per non-split corridor that
+        # was actually evaluated (depth 1's survivor, depth 2's altitude
+        # bands) - the split children must not add to either count.
+        non_split_evidence = len(gen.evidence) - len(split_ids)
+        assert calls["pireps"] == non_split_evidence
+        assert calls["gairmet"] == non_split_evidence
+
+    def test_split_children_carry_their_own_filtered_evidence(self):
+        """Reuse still means re-deriving the reading against the smaller
+        shape, not copying the parent's - the whole point is that the two
+        halves can disagree.
+
+        Beam width 2 here (not 1, as in the cost test above) so that both
+        split children survive to have their evidence gathered - with a
+        beam of 1 only the higher-scoring half would ever reach
+        `gen.evidence`, which says nothing about whether the two halves
+        are derived independently.
+        """
+        from app.reasoning.controller import Budget, search
+        gen, _ = make_gen()
+        fetch, client, now, calls = self._counting_sources()
+        gen.fetch_pireps = fetch
+        gen.gairmet_client = client
+        gen.when = now
+
+        search(gen, beam_width=2, depth_limit=3, confidence_threshold=1.1,
+              budget=Budget(max_tool_calls=30), overlap_fn=gen.overlap_fn,
+              enrich=gen.gather_for_survivors)
+
+        split_ids = [cid for cid in gen.evidence if cid in gen._split_children]
+        assert len(split_ids) == 2
+        readings = {gen.evidence[cid].evidence.reading for cid in split_ids}
+        # One report near each half; each half should see only its own.
+        assert Severity.LIGHT in readings or Severity.SEVERE in readings

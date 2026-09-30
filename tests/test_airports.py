@@ -9,7 +9,8 @@ finds nothing and the result is indistinguishable from a quiet route.
 import pytest
 
 from app.retrieval.airports import (ASSUMED, EXACT, KNOWN, Airport,
-                               resolve_airport, resolve_pair)
+                               local_to_utc, resolve_airport, resolve_pair,
+                               timezone_for)
 
 
 class TestTheCommonCase:
@@ -105,3 +106,64 @@ class TestBothEndsTogether:
         from an airport to itself."""
         o, d = resolve_pair("BOS", "KBOS")
         assert o.code == d.code
+
+
+class TestTimezoneFor:
+    def test_a_known_airport_has_a_timezone(self):
+        assert timezone_for("KPIT") == "America/New_York"
+
+    def test_arizona_has_no_dst_zone(self):
+        """The whole reason this is a table and not the K rule's cousin:
+        Phoenix and Tucson share a state with the rest of Mountain time
+        but not its DST, so both need their own explicit zone rather than
+        inheriting America/Denver."""
+        assert timezone_for("KPHX") == "America/Phoenix"
+        assert timezone_for("KTUS") == "America/Phoenix"
+
+    def test_indiana_is_not_a_bare_new_york_zone(self):
+        assert timezone_for("KIND") == "America/Indiana/Indianapolis"
+
+    def test_an_unresolved_code_has_no_timezone(self):
+        assert timezone_for("KXXX") is None
+
+    def test_an_assumed_guess_has_no_timezone_either(self):
+        """ASSUMED codes are guesses at the airport itself; this table
+        never compounds that guess with a second one about its clock."""
+        guess = resolve_airport("ZZZ")
+        assert guess.how == ASSUMED
+        assert timezone_for(guess.code) is None
+
+
+class TestLocalToUtc:
+    def test_pittsburgh_afternoon_converts_to_utc(self):
+        """Eastern Daylight Time in September is UTC-4."""
+        date, time_ = local_to_utc("2026-09-15", "16:15",
+                                   "America/New_York")
+        assert (date, time_) == ("2026-09-15", "20:15")
+
+    def test_a_winter_departure_uses_standard_time_not_daylight(self):
+        """Eastern Standard Time is UTC-5 - the same clock time converts
+        differently six months apart, which is the entire reason this
+        goes through zoneinfo rather than a fixed offset."""
+        date, time_ = local_to_utc("2026-01-15", "16:15",
+                                   "America/New_York")
+        assert (date, time_) == ("2026-01-15", "21:15")
+
+    def test_an_early_local_departure_can_roll_the_date_backward(self):
+        """2 AM in Tokyo (UTC+9) is still the evening before in UTC - a
+        conversion that only fixed the clock and left the date alone
+        would silently misplace the departure by a day."""
+        date, time_ = local_to_utc("2026-09-15", "02:00", "Asia/Tokyo")
+        assert (date, time_) == ("2026-09-14", "17:00")
+
+    def test_a_late_local_departure_can_roll_the_date_forward(self):
+        """8:30 PM in Los Angeles (UTC-7 in September) is already past
+        midnight in UTC."""
+        date, time_ = local_to_utc("2026-09-15", "20:30",
+                                   "America/Los_Angeles")
+        assert (date, time_) == ("2026-09-16", "03:30")
+
+    def test_arizona_gives_the_same_offset_year_round(self):
+        summer = local_to_utc("2026-07-01", "10:00", "America/Phoenix")
+        winter = local_to_utc("2026-01-01", "10:00", "America/Phoenix")
+        assert summer[1] == winter[1] == "17:00"

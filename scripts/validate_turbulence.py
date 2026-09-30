@@ -17,10 +17,18 @@ Usage:
     python3 scripts/validate_turbulence.py --host http://blueadept:8000
     python3 scripts/validate_turbulence.py --origin KPIT --dest KBOS
     python3 scripts/validate_turbulence.py --fixtures    # no API spend
+
+Against a host with a Turnstile challenge in front of it (the public
+deployment), every search here is an automated client and cannot solve
+it - same situation load_test.py documents. Set TURBULENCE_OPERATOR_TOKEN
+(or pass --operator-token; prefer the environment variable, since an
+argument is visible in ps output and shell history) or run this from
+inside the instance against 127.0.0.1, which is exempt.
 """
 
 import argparse
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -29,6 +37,9 @@ from pathlib import Path
 
 PASS, FAIL, WARN, INFO = "PASS", "FAIL", "WARN", "INFO"
 _RESULTS: list[tuple[str, str, str]] = []
+#: Set from --operator-token in main(). Module-level so post() doesn't need
+#: it threaded through every call site.
+_OPERATOR_TOKEN: str | None = None
 
 
 def record(status: str, name: str, detail: str = "") -> bool:
@@ -47,10 +58,12 @@ def section(title: str) -> None:
 
 
 def post(host: str, path: str, body: dict) -> dict:
+    headers = {"Content-Type": "application/json"}
+    if _OPERATOR_TOKEN:
+        headers["X-Operator-Token"] = _OPERATOR_TOKEN
     req = urllib.request.Request(
         f"{host}{path}", method="POST",
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"})
+        data=json.dumps(body).encode(), headers=headers)
     with urllib.request.urlopen(req, timeout=180) as resp:
         return json.loads(resp.read().decode())
 
@@ -366,9 +379,24 @@ def main() -> int:
                     help="replay saved payloads, no API spend")
     ap.add_argument("--save", action="store_true",
                     help="write the response to data/validate_turbulence.json")
+    ap.add_argument("--operator-token",
+                    default=os.environ.get("TURBULENCE_OPERATOR_TOKEN"),
+                    help="defaults to $TURBULENCE_OPERATOR_TOKEN. Prefer the "
+                         "environment variable: a command-line argument is "
+                         "visible in ps output and shell history")
     args = ap.parse_args()
 
+    global _OPERATOR_TOKEN
+    _OPERATOR_TOKEN = args.operator_token
+
     host = args.host.rstrip("/")
+    if not _OPERATOR_TOKEN and not host.startswith("http://127."):
+        # --fixtures only changes what the search reads from, not whether
+        # it has to get past the challenge first - both need the token.
+        print("  no operator token set. If the site has a challenge in "
+             "front of it,\n  every search will be refused. Set "
+             "TURBULENCE_OPERATOR_TOKEN, or run\n  this from the instance "
+             "against http://127.0.0.1:8000.\n")
     print(f"Validating {host}  ·  {args.origin} to {args.dest}"
           f"{'  (fixtures)' if args.fixtures else ''}")
 

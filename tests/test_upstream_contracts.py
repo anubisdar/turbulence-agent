@@ -39,6 +39,8 @@ from pathlib import Path
 
 import pytest
 
+from app.sources.gairmet import TURBULENCE_HAZARDS
+
 PROJECT = Path(__file__).resolve().parents[1]
 AEROAPI_PROBE = PROJECT / "data" / "aeroapi_probe"
 AWC_PROBE = PROJECT / "data" / "awc_probe"
@@ -189,15 +191,34 @@ class TestGairmetShapeIsWhatWeParse:
             pytest.skip("no TANGO products in the capture")
         hazards = {(f.get("properties", f) or {}).get("hazard")
                    for f in tango}
-        assert hazards - {"TURB-HI", "TURB-LO"}, (
-            "every TANGO product in this capture is turbulence, so the "
-            "distinction is untested here rather than untrue")
+        if not hazards - {"TURB-HI", "TURB-LO"}:
+            # Not a failure of the belief being tested - the capture just
+            # didn't happen to catch a non-turbulence TANGO product today.
+            # An assert here would fail on live weather rather than on a
+            # real regression, which is the wrong thing to page anyone
+            # over; this needs a different day's capture, not a fix.
+            pytest.skip("every TANGO product in this capture is turbulence, "
+                        "so the distinction is untested here rather than "
+                        "untrue")
 
     def test_geometry_is_not_geojson(self):
         """`geom` and `geometryType` are both the literal string AREA, and
-        the shape lives in `coords` as lat/lon dictionaries of strings."""
-        features = self._features()
-        sample = features[0] if features else pytest.skip("no features")
+        the shape lives in `coords` as lat/lon dictionaries of strings.
+
+        This is only a claim about turbulence hazards, not the whole
+        bulletin. `_features()` prefers gairmet_all.json - every hazard the
+        endpoint carries - and a real capture from it legitimately includes
+        LINE-geometry products alongside the AREA ones: FZLVL (the freezing
+        level) and LLWS are contour lines by convention, not enclosed
+        regions, so features[0] from the unfiltered bulletin is not a
+        turbulence feature often enough to assert anything about. What
+        parse_advisory()/turbulence_only() actually depend on being AREA is
+        narrower: only the features whose hazard is one this app uses."""
+        turbulence = [f for f in self._features()
+                     if (f.get("properties", f) or {}).get("hazard")
+                     in TURBULENCE_HAZARDS]
+        sample = turbulence[0] if turbulence \
+            else pytest.skip("no turbulence-hazard feature in the capture")
         props = sample.get("properties", sample)
         assert props.get("geometryType") == "AREA"
         assert isinstance(props.get("coords"), list)

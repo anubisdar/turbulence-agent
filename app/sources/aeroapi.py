@@ -60,6 +60,16 @@ class RateLimited(AeroAPIError):
     pass
 
 
+class NetworkError(AeroAPIError):
+    """The request never got a response at all - a timeout, a DNS
+    failure, a refused connection - as distinct from AeroAPI itself
+    answering with an error status. Wrapped as an AeroAPIError rather
+    than left as the raw urllib/socket exception so every caller that
+    already catches AeroAPIError (tripchat's flight-number lookup and
+    route verification, in particular) degrades gracefully here too,
+    instead of a plain network blip surfacing as an unhandled 500."""
+
+
 #: (path, params) -> (status, parsed_json_or_None, raw_body)
 Transport = Callable[[str, dict], tuple[int, dict | None, str]]
 
@@ -155,6 +165,29 @@ def parse_distance_to_nm(value) -> float | None:
     return n
 
 
+def _segment_from_json(seg: dict) -> FlightSegment:
+    """One itinerary segment, as AeroAPI's JSON shapes it, into the
+    dataclass every endpoint that reads a segment actually works with.
+    Factored out because `flights_between` and `route_or_long_haul_leg`
+    both build one from the same shape and a field added to one silently
+    missing from the other is exactly the kind of drift this avoids.
+    """
+    return FlightSegment(
+        ident=seg.get("ident") or "",
+        fa_flight_id=seg["fa_flight_id"],
+        aircraft_type=seg.get("aircraft_type"),
+        status=seg.get("status"),
+        actual_off=seg.get("actual_off"),
+        scheduled_out=seg.get("scheduled_out"),
+        route=seg.get("route"),
+        filed_altitude_ft=(seg.get("filed_altitude") or 0) * 100
+                          if seg.get("filed_altitude") else None,
+        reported_distance=parse_distance_to_nm(seg.get("route_distance")),
+        origin=(seg.get("origin") or {}).get("code"),
+        destination=(seg.get("destination") or {}).get("code"),
+    )
+
+
 # ------------------------------------------------------------------ client
 
 
@@ -178,7 +211,8 @@ class AeroAPIClient:
 
     # -------------------------------------------------------------- request
 
-    def _http(self, path: str, params: dict) -> tuple[int, dict | None, str]:
+    def _http(self, path: str, params: dict,
+             timeout: int = 60) -> tuple[int, dict | None, str]:
         url = f"{self.base_url}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
@@ -187,12 +221,23 @@ class AeroAPIClient:
             "Accept": "application/json; charset=UTF-8",
         })
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8")
                 return resp.status, json.loads(raw), raw
         except urllib.error.HTTPError as e:
             raw = e.read().decode("utf-8", "replace")
             return e.code, None, raw
+        except (urllib.error.URLError, OSError) as e:
+            # HTTPError (a response, just a bad-status one) is handled
+            # above and is itself a URLError subclass, so this is
+            # specifically the request never getting a response: a
+            # timeout, DNS failure, or refused connection. Raised here,
+            # not returned as a status tuple, because there is no status
+            # to hand back - every caller of `request()` already expects
+            # an AeroAPIError on failure, so this reaches them the same
+            # way a bad HTTP status would rather than as a raw socket
+            # exception their `except AeroAPIError` blocks don't catch.
+            raise NetworkError(f"network error on {path}: {e}") from e
 
     def _timed(self, fn):
         """Run a call, recording its wall time against the AeroAPI bucket.
@@ -206,9 +251,16 @@ class AeroAPIClient:
             return fn()
 
     def request(self, path: str, params: dict | None = None,
-                _retried: bool = False) -> dict:
+                _retried: bool = False, timeout: int = 60) -> dict:
         params = params or {}
-        transport = self.transport or self._http
+        # `self.transport`, when set, is always a test fake - its callers in
+        # tests/test_aeroapi.py pass a plain (path, params) callable, so the
+        # timeout only threads through when the real network transport is
+        # the one actually making the call; a fake has nothing to time out.
+        if self.transport is None:
+            transport = lambda p, prm: self._http(p, prm, timeout=timeout)
+        else:
+            transport = self.transport
 
         self.calls_made += 1
         self.call_log.append(path)
@@ -226,7 +278,7 @@ class AeroAPIClient:
             if _retried:
                 raise RateLimited(f"rate limited twice on {path}")
             self._timed(lambda: self.sleep(RATE_LIMIT_BACKOFF_SECONDS))
-            return self.request(path, params, _retried=True)
+            return self.request(path, params, _retried=True, timeout=timeout)
 
         if status == 401:
             # AeroAPI uses 401 for tier restrictions as well as bad keys.
@@ -241,7 +293,8 @@ class AeroAPIClient:
 
     def flights_between(self, origin: str, dest: str,
                         max_pages: int = 1,
-                        nonstop_only: bool = True) -> list[FlightSegment]:
+                        nonstop_only: bool = True,
+                        timeout: int = 60) -> list[FlightSegment]:
         """Flights on an airport pair, flattened out of their itineraries.
 
         NONSTOP ONLY, BY DEFAULT. This endpoint returns itineraries, and an
@@ -258,7 +311,7 @@ class AeroAPIClient:
         else's flight.
         """
         body = self.request(f"/airports/{origin}/flights/to/{dest}",
-                            {"max_pages": max_pages})
+                            {"max_pages": max_pages}, timeout=timeout)
         origin, dest = origin.upper(), dest.upper()
         out: list[FlightSegment] = []
         for itinerary in body.get("flights") or []:
@@ -272,22 +325,72 @@ class AeroAPIClient:
                         continue
                     if (seg_dest or "").upper() != dest:
                         continue
-                out.append(FlightSegment(
-                    ident=seg.get("ident") or "",
-                    fa_flight_id=seg["fa_flight_id"],
-                    aircraft_type=seg.get("aircraft_type"),
-                    status=seg.get("status"),
-                    actual_off=seg.get("actual_off"),
-                    scheduled_out=seg.get("scheduled_out"),
-                    route=seg.get("route"),
-                    filed_altitude_ft=(seg.get("filed_altitude") or 0) * 100
-                                      if seg.get("filed_altitude") else None,
-                    reported_distance=parse_distance_to_nm(
-                        seg.get("route_distance")),
-                    origin=(seg.get("origin") or {}).get("code"),
-                    destination=(seg.get("destination") or {}).get("code"),
-                ))
+                out.append(_segment_from_json(seg))
         return out
+
+    def route_or_long_haul_leg(self, origin: str, dest: str,
+                               max_pages: int = 1, timeout: int = 60
+                               ) -> tuple[list[FlightSegment],
+                                         FlightSegment | None]:
+        """Nonstop flights on this exact pair, and separately - only when
+        there are none - the longest single leg among any connecting
+        itinerary AeroAPI offered for it.
+
+        One request answers both questions. `/airports/{a}/flights/to/{b}`
+        already returns full itineraries broken into segments, so when a
+        connection is all that exists - a San Diego to Tokyo query comes
+        back as KSAN-KLAX then KLAX-RJTT - the itinerary's other legs are
+        sitting in the very response that told us there's no nonstop
+        service. Fetching them with a second call would be the same
+        request twice.
+
+        Ranked by filed route distance (`reported_distance`, a cross-check
+        value the rest of this client doesn't trust for geometry - see the
+        module docstring, and only trusted here to compare two legs
+        against each other, never as an actual length). A leg with no
+        reported distance never wins: picking one arbitrarily among
+        several with nothing to rank them by is exactly how a regional
+        feeder got returned as the reference flight for Seattle to Tokyo
+        in the first place (see `flights_between`'s own docstring) - the
+        first leg listed in an itinerary is typically the short feeder,
+        not the long-haul leg, so "just pick one" would systematically
+        pick the wrong one, not a random one. No confidently-ranked
+        candidate means no substitute; the caller falls back to reporting
+        that no nonstop service exists at all, which is honest, over a
+        guess that looks like an answer.
+
+        The second element is only ever populated when the first is
+        empty - a pair with real nonstop service has nothing to
+        substitute - and only when at least one connecting itinerary
+        AeroAPI returned for it actually reported a leg distance to rank
+        by; a pair with no service at all, or only distance-less
+        connections, gets neither.
+        """
+        body = self.request(f"/airports/{origin}/flights/to/{dest}",
+                            {"max_pages": max_pages}, timeout=timeout)
+        origin, dest = origin.upper(), dest.upper()
+        nonstop: list[FlightSegment] = []
+        candidates: list[tuple[float, FlightSegment]] = []
+        for itinerary in body.get("flights") or []:
+            segs = itinerary.get("segments") or []
+            for seg in segs:
+                if not seg.get("fa_flight_id"):
+                    continue
+                seg_origin = (seg.get("origin") or {}).get("code", "").upper()
+                seg_dest = (seg.get("destination") or {}).get("code", "").upper()
+                if seg_origin == origin and seg_dest == dest:
+                    nonstop.append(_segment_from_json(seg))
+            if len(segs) < 2:
+                continue  # a nonstop itinerary, not a connection to mine
+            for seg in segs:
+                if not seg.get("fa_flight_id"):
+                    continue
+                nm = parse_distance_to_nm(seg.get("route_distance"))
+                if nm is not None:
+                    candidates.append((nm, _segment_from_json(seg)))
+        best_leg = (max(candidates, key=lambda pair: pair[0])[1]
+                   if candidates and not nonstop else None)
+        return nonstop, best_leg
 
     def most_recently_flown(self, origin: str, dest: str
                             ) -> FlightSegment | None:
@@ -301,6 +404,44 @@ class AeroAPIClient:
             return None
         flown.sort(key=lambda s: s.actual_off or "", reverse=True)
         return flown[0]
+
+    def flight_by_ident(self, ident: str) -> FlightSegment | None:
+        """The airports a flight number actually flies, from the flight
+        itself rather than from a pair already assumed.
+
+        `/flights/{ident}` returns flat flight objects, not the itinerary
+        wrapper `/airports/.../flights/to/...` uses - no `"segments"` to
+        unwrap. An ident is commonly reused across a day's multiple legs
+        of the same route (an outbound and its return, say), so this
+        prefers whichever instance has already flown - the one nearest in
+        time to "right now" is the one a passenger who just typed the
+        number almost certainly means - falling back to the soonest
+        scheduled instance when nothing has departed yet.
+        """
+        body = self.request(f"/flights/{ident}", {"max_pages": 1})
+        segments: list[FlightSegment] = []
+        for f in body.get("flights") or []:
+            if not f.get("fa_flight_id"):
+                continue
+            segments.append(FlightSegment(
+                ident=f.get("ident") or ident,
+                fa_flight_id=f["fa_flight_id"],
+                aircraft_type=f.get("aircraft_type"),
+                status=f.get("status"),
+                actual_off=f.get("actual_off"),
+                scheduled_out=f.get("scheduled_out"),
+                route=f.get("route"),
+                filed_altitude_ft=(f.get("filed_altitude") or 0) * 100
+                                  if f.get("filed_altitude") else None,
+                reported_distance=parse_distance_to_nm(f.get("route_distance")),
+                origin=(f.get("origin") or {}).get("code"),
+                destination=(f.get("destination") or {}).get("code"),
+            ))
+        if not segments:
+            return None
+        flown = [s for s in segments if s.has_flown]
+        pool = flown or segments
+        return max(pool, key=lambda s: s.actual_off or s.scheduled_out or "")
 
     def route_fixes(self, fa_flight_id: str) -> list[RouteFix]:
         """Filed route with coordinates. Also warms the fix cache."""

@@ -167,8 +167,26 @@ class TestCorridorSearch:
         data = do_search(client, max_tool_calls=2)
         assert data["outcome"]["calls_used"] <= 2
 
-    def test_the_graph_controller_agrees_with_the_loop(self, client):
+    def test_the_graph_controller_agrees_with_the_loop(self, client, tmp_path,
+                                                       monkeypatch):
+        """Each engine gets its own cold route-fix cache.
+
+        The two calls below share one `client`, and the route-fix cache is
+        real, persistent, and keyed on disk (see `app/sources/fixes.py`) -
+        a second request for the same pair is deliberately cheaper than the
+        first. Reusing one cache across both calls would let that warm-up
+        savings, not the engine, decide who reaches a given depth: on a
+        request tight enough against the tool-call budget to need every
+        call it gets (as a depth-3 search now can be, since a longitudinal
+        split's own evidence is free but its parent's altitude-band
+        gathers are not), a cache hit for the second call can buy it one
+        more depth than the first ever got a fair shot at, and this test
+        would compare "warm-cache engine" against "cold-cache engine"
+        instead of loop against graph.
+        """
+        monkeypatch.setenv("TURBULENCE_DB", str(tmp_path / "plain.db"))
         plain = do_search(client, use_graph=False)
+        monkeypatch.setenv("TURBULENCE_DB", str(tmp_path / "graph.db"))
         graph = do_search(client, use_graph=True)
         assert plain["trace"] == graph["trace"]
         assert plain["outcome"]["winner"] == graph["outcome"]["winner"]
@@ -351,6 +369,27 @@ class TestDepartureTime:
 
     def test_no_time_still_works(self, client):
         assert do_search(client)["request"]["departure_time"] is None
+
+
+class TestFlightNumberPin:
+    """A flight number that matches a flown segment pins the reference
+    flight instead of the search picking one by departure time."""
+
+    def test_a_matching_flight_number_is_reported_as_pinned(self, client):
+        data = do_search(client, flight_number="JBU1286")
+        assert any("pinned to JBU1286" in n for n in data["generator_notes"])
+
+    def test_a_non_matching_flight_number_falls_back_and_says_so(self, client):
+        data = do_search(client, flight_number="DL9999")
+        assert any(
+            "No recent" in n and "DL9999" in n for n in data["generator_notes"])
+
+    @pytest.mark.parametrize("bad", ["", "x", "a very long flight number"])
+    def test_malformed_flight_numbers_are_rejected(self, client, bad):
+        r = client.post("/api/search/corridors",
+                        json={"origin": "KPIT", "dest": "KBOS",
+                              "use_fixtures": True, "flight_number": bad})
+        assert r.status_code == 422
 
 
 class TestAircraftBridge:
@@ -1139,8 +1178,9 @@ class TestTripChat:
         r = client.post("/api/chat/trip", json={
             "messages": [{"role": "user", "content": "hello"}]})
         body = r.json()
-        assert set(body) == {"reply", "complete", "trip", "resolution",
-                             "notes", "source"}
+        assert set(body) == {"reply", "complete", "trip", "flight_number",
+                             "upcoming_flights", "resolution", "notes",
+                             "source"}
         assert set(body["resolution"]) == {"origin", "dest"}
 
     def test_a_long_conversation_is_clamped_when_public(self, client,

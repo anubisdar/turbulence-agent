@@ -32,7 +32,9 @@ scores neutral, never zero, and never prunes.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Sequence
 
 from app.logging_setup import get_logger, kv
@@ -44,13 +46,15 @@ from app.reasoning.critic import (
     Provenance,
     Severity,
 )
-from app.reasoning.evidence import GatherResult, gather_evidence
+from app.reasoning.evidence import GatherResult, evidence_from_raw, gather_evidence
 from app.reasoning.geometry import (
     DEFAULT_WIDTH_NM,
     CorridorShape,
     build_corridor,
     corridor_overlap_fn,
     great_circle,
+    intersects_ring,
+    leg_length_nm,
     max_dogleg_deg,
     path_length_nm,
     simplify_track,
@@ -69,10 +73,11 @@ CRUISE_BAND_FT = 4000
 MIN_CRUISE_ALTITUDE_FT = 10000
 
 #: Depth beyond which this generator has nothing further to offer. Depth 3
-#: was reserved for data-gap strategies, which need turbulence evidence to
-#: choose between - so it stays unused until the weather layer lands, rather
-#: than inventing branches that differ only cosmetically.
-MAX_USEFUL_DEPTH = 2
+#: was reserved for data-gap strategies - splitting a corridor lengthwise
+#: when the evidence says it is not uniform - and needed turbulence
+#: evidence to choose between, which now exists. See
+#: `CorridorGenerator._longitudinal_branches`.
+MAX_USEFUL_DEPTH = 3
 
 log = get_logger("generator")
 
@@ -109,6 +114,12 @@ class CorridorGenerator:
     #: 19:00 departure on the same route fly different air, so the reference
     #: flight is chosen by time of day rather than simply by recency.
     target_time: str | None = None
+    #: Optional flight number, e.g. "UA1234". When it matches a flown
+    #: segment on this pair, that flight is pinned as the reference instead
+    #: of the one nearest target_time - the passenger's own flight beats a
+    #: statistical guess at it. Never required; a miss falls back silently
+    #: to the existing target_time behaviour, with a note explaining why.
+    flight_number: str | None = None
 
     #: Turbulence sources. Both optional: without them the search still runs
     #: and every corridor reports its reading as unresolved, which is the
@@ -134,6 +145,16 @@ class CorridorGenerator:
     #: needed no donor fetch, which is a metered call the warm cache saved.
     cache_hits: int = field(default=0)
     calls_saved: int = field(default=0)
+    #: Ids of corridors produced by a longitudinal split. Distinguishes them
+    #: from the depth-2 altitude branches, which also carry a parent_id but
+    #: still need a fresh fetch - see `_gather_for`.
+    _split_children: set = field(default_factory=set, repr=False)
+    #: (requested_origin, requested_dest, searched_origin, searched_dest)
+    #: when `_get_flight` substituted a connecting itinerary's long-haul
+    #: leg for a pair with no nonstop service of its own. None means the
+    #: search ran on the pair exactly as given - the overwhelming common
+    #: case, since most pairs asked about do have nonstop service.
+    route_substitution: tuple[str, str, str, str] | None = None
 
     # ------------------------------------------------------------ helpers
 
@@ -263,7 +284,22 @@ class CorridorGenerator:
         )
 
     def _get_flight(self, budget: Budget) -> FlightSegment | None:
-        """The most recently departed flight on this pair. One call, reused."""
+        """The most recently departed flight on this pair. One call, reused.
+
+        When the pair itself has no nonstop service, this also tries the
+        long-haul leg of a connecting itinerary AeroAPI returned for it in
+        that same call - see `AeroAPIClient.route_or_long_haul_leg`. San
+        Diego to Tokyo has no nonstop; KLAX to RJTT, the leg inside a real
+        SAN-LAX-NRT itinerary, is where the turbulence actually is.
+
+        Finding one substitutes this generator's own origin/dest for the
+        rest of the search: every corridor built after this point,
+        including the great-circle baseline, describes that leg rather
+        than the door-to-door trip the search was asked for.
+        `route_substitution` records the swap (requested pair, searched
+        pair) so the caller can say so, clearly, rather than let a reader
+        assume the corridor covers a trip it never actually examined.
+        """
         if self._looked_for_flight:
             return self._flight
         self._looked_for_flight = True
@@ -271,13 +307,63 @@ class CorridorGenerator:
             self._note("Tool budget exhausted before a flight could be found.")
             return None
         try:
-            self._segments = self.client.flights_between(self.origin, self.dest)
+            self._segments, leg = self.client.route_or_long_haul_leg(
+                self.origin, self.dest)
         except AeroAPIError as e:
             self._note(f"Could not list flights on this pair: {e}")
             return None
+
+        if not self._segments and leg is not None \
+                and leg.origin and leg.destination \
+                and (leg.origin, leg.destination) != (self.origin, self.dest):
+            requested_origin, requested_dest = self.origin, self.dest
+            self.origin, self.dest = leg.origin, leg.destination
+            self.route_substitution = (requested_origin, requested_dest,
+                                       self.origin, self.dest)
+            self._segments = [leg]
+            self._note(
+                f"No nonstop service between {requested_origin} and "
+                f"{requested_dest}. Searching the long-haul leg instead: "
+                f"{self.origin} to {self.dest}, from a connecting "
+                f"itinerary through here. Every corridor below describes "
+                f"that leg, not the door-to-door trip."
+            )
+
         flown = [s for s in self._segments if s.has_flown]
-        self._flight = _pick_reference(flown, self.target_time)
-        if self._flight and self.target_time:
+
+        pinned = False
+        if self.flight_number:
+            match = _match_flight_number(flown, self.flight_number)
+            if match:
+                self._flight = match
+                pinned = True
+                self._note(
+                    f"Reference flight pinned to {match.ident}, matching "
+                    f"the flight number given, rather than chosen by "
+                    f"departure time."
+                )
+            else:
+                unflown_match = _match_flight_number(
+                    self._segments, self.flight_number)
+                if unflown_match:
+                    self._note(
+                        f"{self.flight_number} matches {unflown_match.ident} "
+                        f"on this pair, but it hasn't flown yet in the "
+                        f"available window, so no track exists to pin to. "
+                        f"Falling back to the flight nearest "
+                        f"{self.target_time or 'the most recent departure'}."
+                    )
+                else:
+                    self._note(
+                        f"No recent {self.origin}-{self.dest} flight matched "
+                        f"flight number {self.flight_number}. Falling back "
+                        f"to the flight nearest "
+                        f"{self.target_time or 'the most recent departure'}."
+                    )
+
+        if not pinned:
+            self._flight = _pick_reference(flown, self.target_time)
+        if self._flight and self.target_time and not pinned:
             self._note(
                 f"Reference flight {self._flight.ident} chosen for departing "
                 f"nearest {self.target_time} UTC, not for being the most "
@@ -501,6 +587,23 @@ class CorridorGenerator:
         if corridor.id in self.evidence:
             return corridor
 
+        # A longitudinal split reuses the reports and advisories already
+        # fetched for its parent, re-testing them against a smaller shape
+        # instead of fetching for the same airspace again. This is what
+        # makes depth 3 free: the parent's evidence is what decided to
+        # split in the first place, so it is always present here.
+        if corridor.id in self._split_children:
+            parent_gathered = self.evidence.get(corridor.parent_id or "")
+            if parent_gathered is not None:
+                result = evidence_from_raw(
+                    shape, parent_gathered.raw_reports,
+                    parent_gathered.raw_advisories,
+                    self.when or datetime.now(timezone.utc))
+                self.evidence[corridor.id] = result
+                for n in result.notes:
+                    self._note(f"{corridor.id}: {n}")
+                return replace(corridor, evidence=result.evidence)
+
         if not (self.fetch_pireps or self.gairmet_client):
             return corridor
 
@@ -571,6 +674,93 @@ class CorridorGenerator:
                 out.append(child)
         return out
 
+    # ------------------------------------------------------------ depth 3
+
+    def _longitudinal_branches(self, parent: Corridor) -> list[Corridor]:
+        """Split a corridor lengthwise, only when its own evidence says it
+        is not uniform.
+
+        Splitting a route the search already understands produces two
+        children with the same answer, which would burn depth-3 reasoning
+        to restate depth-2 - see `MAX_USEFUL_DEPTH`. This only fires when
+        at least one of three signals, already gathered for `parent`, says
+        conditions differ from one end of the corridor to the other:
+
+        - pilot-report coverage is partial: some of the route has been
+          looked at, not all of it
+        - pilot reports inside the corridor disagree with each other
+        - a turbulence forecast covers one part of the corridor and not
+          the rest
+
+        All three are read from evidence `parent` already carries. Nothing
+        here spends a call - see `_gather_for` for how the children's own
+        evidence is then derived from the same fetch, not a new one.
+        """
+        shape = self.shapes.get(parent.id)
+        gathered = self.evidence.get(parent.id)
+        if shape is None or gathered is None:
+            return []
+        if shape.length_nm < MIN_SPLIT_LENGTH_NM:
+            return []
+
+        cov = gathered.evidence.coverage_fraction
+        partial_coverage = cov is not None and 0.0 < cov < 1.0
+        mixed_reports = gathered.observed_mixed
+
+        first_pts, second_pts = _split_points(shape.points)
+        if not first_pts or not second_pts:
+            return []
+
+        forecast_partial = False
+        if gathered.matched_advisories:
+            first_probe = build_corridor(
+                first_pts, width_nm=self.width_nm,
+                altitude_min_ft=shape.altitude_min_ft,
+                altitude_max_ft=shape.altitude_max_ft)
+            second_probe = build_corridor(
+                second_pts, width_nm=self.width_nm,
+                altitude_min_ft=shape.altitude_min_ft,
+                altitude_max_ft=shape.altitude_max_ft)
+            hits_first = any(intersects_ring(first_probe, a.ring)
+                             for a in gathered.matched_advisories)
+            hits_second = any(intersects_ring(second_probe, a.ring)
+                              for a in gathered.matched_advisories)
+            forecast_partial = hits_first != hits_second
+
+        if not (partial_coverage or mixed_reports or forecast_partial):
+            return []
+
+        reasons = []
+        if partial_coverage:
+            reasons.append(f"pilot-report coverage is partial ({cov:.0%})")
+        if mixed_reports:
+            reasons.append("pilot reports along it disagree with each other")
+        if forecast_partial:
+            reasons.append("the forecast covers one part of it and not the "
+                          "rest")
+        self._note(
+            f"Splitting {parent.id} lengthwise, near its midpoint: "
+            + "; ".join(reasons) + "."
+        )
+
+        out: list[Corridor] = []
+        for suffix, pts, label in (
+            ("first", first_pts, "first half"),
+            ("second", second_pts, "second half"),
+        ):
+            cid = f"{parent.id}/{suffix}"
+            gc_nm = path_length_nm(great_circle(pts[0], pts[-1], 24))
+            child = self._corridor(
+                cid, parent.provenance, pts, gc_nm,
+                altitude_min=shape.altitude_min_ft,
+                altitude_max=shape.altitude_max_ft,
+                depth=parent.depth + 1, parent_id=parent.id, label=label,
+            )
+            if child:
+                self._split_children.add(cid)
+                out.append(child)
+        return out
+
     # ------------------------------------------------------------ protocol
 
     def __call__(self, parent: Corridor | None, depth: int,
@@ -624,7 +814,9 @@ class CorridorGenerator:
 
         if parent is None:
             return []
-        return self._altitude_branches(parent)
+        if depth == 2:
+            return self._altitude_branches(parent)
+        return self._longitudinal_branches(parent)
 
 
 def _minutes(stamp: str | None) -> int | None:
@@ -636,6 +828,38 @@ def _minutes(stamp: str | None) -> int | None:
         return int(hh) * 60 + int(mm)
     except (ValueError, IndexError):
         return None
+
+
+#: Splits a normalized ident/flight-number into its airline-letters
+#: prefix and its numeric suffix - "UA1234" -> ("UA", "1234").
+_IDENT_SHAPE = re.compile(r"^([A-Z]+)(\d+)[A-Z]?$")
+
+
+def _match_flight_number(segments: list, flight_number: str):
+    """The segment, if any, whose ident is the given flight number.
+
+    AeroAPI idents carry the airline's three-letter ICAO prefix (UAL1234);
+    a passenger types the two-letter IATA one (UA1234). Matched on the
+    numeric suffix plus a shared prefix - one code starting with the other
+    - rather than exact equality, so a real match isn't missed over a
+    convention difference. `flight_number` is assumed already normalized
+    (uppercase, no spaces or dashes) by the caller.
+    """
+    want = _IDENT_SHAPE.match(flight_number or "")
+    if not want:
+        return None
+    want_letters, want_digits = want.groups()
+
+    for seg in segments:
+        got = _IDENT_SHAPE.match((seg.ident or "").upper())
+        if not got:
+            continue
+        got_letters, got_digits = got.groups()
+        if got_digits != want_digits:
+            continue
+        if got_letters.startswith(want_letters) or want_letters.startswith(got_letters):
+            return seg
+    return None
 
 
 def _pick_reference(flown: list, target_time: str | None):
@@ -677,6 +901,55 @@ def cruise_band(altitudes: list[int]) -> tuple[int, int] | None:
     top = max(usable)
     cruise = [a for a in usable if a >= top - CRUISE_BAND_FT]
     return (min(cruise), top)
+
+
+#: Below this, a corridor is too short to split usefully. Each half would
+#: approach the scale of the corridor's own width, and a single PIREP or
+#: forecast polygon at that scale already describes "the whole thing"
+#: rather than one segment of it - splitting would manufacture a
+#: distinction the underlying data cannot actually support.
+MIN_SPLIT_LENGTH_NM = 300
+
+
+def _split_points(points: list[LatLon]) -> tuple[list[LatLon], list[LatLon]]:
+    """A path cut in two by cumulative distance, not by point count.
+
+    Distance rather than point count because a flown track's points are not
+    evenly spaced - cruise generates one position every ~27 seconds' worth
+    of ground, climb and descent bunch them close together. Halving by
+    index would put the split somewhere near the destination on a track
+    with a long, dense descent.
+
+    The split point is a straight linear interpolation between the two
+    points straddling the midpoint, not a geodesic one - at the ~150+ nm
+    scale a half-corridor's own length is measured at, the difference is
+    well under the corridor's width and not worth a second projection.
+
+    Both halves share the split point, so a report from a probe corridor
+    built around it is never missed at the seam.
+    """
+    if len(points) < 2:
+        return [], []
+    total = path_length_nm(points)
+    if total <= 0:
+        mid = max(1, len(points) // 2)
+        return points[:mid + 1], points[mid:]
+
+    target = total / 2.0
+    cumulative = 0.0
+    for i in range(1, len(points)):
+        leg = leg_length_nm(points[i - 1], points[i])
+        if cumulative + leg >= target:
+            frac = (target - cumulative) / leg if leg > 0 else 0.0
+            split = (
+                points[i - 1][0] + frac * (points[i][0] - points[i - 1][0]),
+                points[i - 1][1] + frac * (points[i][1] - points[i - 1][1]),
+            )
+            return points[:i] + [split], [split] + points[i:]
+        cumulative += leg
+
+    mid = max(1, len(points) // 2)
+    return points[:mid + 1], points[mid:]
 
 
 def _lookup(conn, names):

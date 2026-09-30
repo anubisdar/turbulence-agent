@@ -1,11 +1,14 @@
 """The interface must not offer a depth the generator cannot honour.
 
-The controller's default was 3 and the form allowed up to 4, while the
-generator implements two levels: corridor source at depth 1, cruise
+The controller's default was once 3 and the form allowed up to 4, while the
+generator implemented only two levels: corridor source at depth 1, cruise
 altitude band at depth 2. A third pass produced no candidates and the
 search stopped, so it cost no API calls and returned the same answer -
-which is the problem. A caller who chose depth 3 reasonably assumed they
-had searched deeper, and nothing said otherwise.
+which was the problem. A caller who chose depth 3 reasonably assumed they
+had searched deeper, and nothing said otherwise. Depth 3 has since been
+written - a conditional longitudinal split, see
+`CorridorGenerator._longitudinal_branches` - so the constant moved back to
+3, this time because a third expansion actually exists.
 
 A control that appears to do something and does not is worse than one
 that refuses, because there is nothing to notice.
@@ -21,10 +24,11 @@ class TestTheDefaultMatchesWhatExists:
     def test_the_default_is_within_what_is_implemented(self):
         assert DEFAULT_DEPTH_LIMIT <= MAX_IMPLEMENTED_DEPTH
 
-    def test_two_levels_are_implemented(self):
-        """Corridor source, then altitude band. Raising this constant
-        without writing a third expansion re-creates the original bug."""
-        assert MAX_IMPLEMENTED_DEPTH == 2
+    def test_three_levels_are_implemented(self):
+        """Corridor source, altitude band, then a conditional longitudinal
+        split. Raising this constant without writing a fourth expansion
+        would re-create the original bug."""
+        assert MAX_IMPLEMENTED_DEPTH == 3
 
 
 class TestTheFormOffersOnlyWhatWorks:

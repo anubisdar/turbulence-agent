@@ -4,12 +4,16 @@ Fixtures are the real payload shapes captured from a live Personal-tier key
 during the probe, not invented ones. Nothing here touches the network.
 """
 
+import socket
+import urllib.error
+
 import pytest
 
 from app.sources.aeroapi import (
     AeroAPIClient,
     AeroAPIError,
     AlternateRouting,
+    NetworkError,
     RateLimited,
     TierRestricted,
     parse_distance_to_nm,
@@ -155,6 +159,49 @@ class TestMostRecentlyFlown:
         assert c.most_recently_flown("KPIT", "KBOS") is None
 
 
+FLIGHT_BY_IDENT = {"flights": [
+    {"ident": "DL5731", "fa_flight_id": "DL5731-1786000000-airline-1p",
+     "status": "Scheduled", "aircraft_type": "A321",
+     "actual_off": None, "scheduled_out": "2026-08-12T09:00:00Z",
+     "route": "", "route_distance": 700, "filed_altitude": 360,
+     "origin": {"code": "KATL"}, "destination": {"code": "KJFK"}},
+    {"ident": "DL5731", "fa_flight_id": "DL5731-1785913600-airline-1p",
+     "status": "Arrived", "aircraft_type": "A321",
+     "actual_off": "2026-08-11T09:05:00Z", "scheduled_out": "2026-08-11T09:00:00Z",
+     "route": "", "route_distance": 700, "filed_altitude": 350,
+     "origin": {"code": "KATL"}, "destination": {"code": "KJFK"}},
+]}
+
+
+class TestFlightByIdent:
+    def test_prefers_the_flown_instance_over_a_scheduled_one(self):
+        c = client({"/flights/DL5731": FLIGHT_BY_IDENT})
+        flight = c.flight_by_ident("DL5731")
+        assert flight.has_flown
+        assert flight.fa_flight_id == "DL5731-1785913600-airline-1p"
+
+    def test_origin_and_destination_are_carried_through(self):
+        c = client({"/flights/DL5731": FLIGHT_BY_IDENT})
+        flight = c.flight_by_ident("DL5731")
+        assert flight.origin == "KATL"
+        assert flight.destination == "KJFK"
+
+    def test_falls_back_to_scheduled_when_nothing_has_flown(self):
+        scheduled_only = {"flights": [FLIGHT_BY_IDENT["flights"][0]]}
+        c = client({"/flights/DL5731": scheduled_only})
+        flight = c.flight_by_ident("DL5731")
+        assert flight is not None
+        assert not flight.has_flown
+
+    def test_an_unknown_ident_returns_none(self):
+        c = client({"/flights/ZZ0000": {"flights": []}})
+        assert c.flight_by_ident("ZZ0000") is None
+
+    def test_entries_without_a_flight_id_are_skipped(self):
+        c = client({"/flights/DL5731": {"flights": [{"ident": "DL5731"}]}})
+        assert c.flight_by_ident("DL5731") is None
+
+
 class TestRouteFixes:
     def test_fixes_carry_coordinates(self):
         c = client({"/route": FLIGHT_ROUTE})
@@ -251,6 +298,36 @@ class TestErrorHandling:
         with pytest.raises(AeroAPIError):
             c.request("/x")
 
+    def test_a_connection_failure_is_wrapped_as_an_aeroapi_error(
+            self, monkeypatch):
+        """The request never got a response at all - no status to return,
+        so unlike the cases above this can't come back through the fake
+        `transport` swap; it has to go through the real `_http` and hit
+        urlopen itself. Every caller of `request()` already only catches
+        AeroAPIError, so this has to become one too rather than an
+        unhandled socket/urllib exception - the whole point being that a
+        network blip degrades the same way a bad HTTP status does."""
+
+        def raise_it(*args, **kwargs):
+            raise urllib.error.URLError("Name or service not known")
+
+        monkeypatch.setattr("urllib.request.urlopen", raise_it)
+        c = AeroAPIClient(api_key="test", spacing_seconds=0,
+                          sleep=lambda s: None)
+        with pytest.raises(AeroAPIError) as exc:
+            c.request("/x")
+        assert isinstance(exc.value, NetworkError)
+
+    def test_a_timeout_is_also_wrapped(self, monkeypatch):
+        def raise_it(*args, **kwargs):
+            raise socket.timeout("timed out")
+
+        monkeypatch.setattr("urllib.request.urlopen", raise_it)
+        c = AeroAPIClient(api_key="test", spacing_seconds=0,
+                          sleep=lambda s: None)
+        with pytest.raises(NetworkError):
+            c.request("/x")
+
 
 class TestCallAccounting:
     def test_every_request_is_counted(self):
@@ -344,3 +421,76 @@ class TestNonstopFiltering:
              "origin": {"code": "ksan"}, "destination": {"code": "rjtt"}}]}]}
         c = client({"/flights/to/RJTT": payload})
         assert len(c.flights_between("KSAN", "RJTT")) == 1
+
+
+class TestRouteOrLongHaulLeg:
+    """The connection-aware search's one entry point into AeroAPI: nonstop
+    flights on the exact pair, and separately - only when there are none -
+    the longest leg among whatever connecting itineraries came back in
+    that same response."""
+
+    def test_a_genuine_nonstop_needs_no_substitute(self):
+        payload = {"flights": [{"segments": [
+            {"ident": "NH106", "fa_flight_id": "nh-1", "aircraft_type": "B77W",
+             "actual_off": "2026-08-16T20:00:00Z",
+             "origin": {"code": "KSAN"}, "destination": {"code": "RJTT"}}]}]}
+        c = client({"/flights/to/RJTT": payload})
+        nonstop, leg = c.route_or_long_haul_leg("KSAN", "RJTT")
+        assert [s.ident for s in nonstop] == ["NH106"]
+        assert leg is None
+
+    def test_a_connection_only_pair_returns_no_nonstop(self):
+        c = client({"/flights/to/RJTT": CONNECTION})
+        nonstop, _ = c.route_or_long_haul_leg("KSAN", "RJTT")
+        assert nonstop == []
+
+    def test_a_connection_with_distances_returns_no_nonstop_and_a_leg(self):
+        payload = {"flights": [{"segments": [
+            {"ident": "SKW4002", "fa_flight_id": "skw-1", "route_distance": 100,
+             "actual_off": "2026-08-16T22:48:35Z",
+             "origin": {"code": "KSAN"}, "destination": {"code": "KLAX"}},
+            {"ident": "ANA125", "fa_flight_id": "ana-1", "route_distance": 5100,
+             "actual_off": "2026-08-17T00:42:55Z",
+             "origin": {"code": "KLAX"}, "destination": {"code": "RJTT"}},
+        ]}]}
+        c = client({"/flights/to/RJTT": payload})
+        nonstop, leg = c.route_or_long_haul_leg("KSAN", "RJTT")
+        assert nonstop == []
+        assert leg is not None
+
+    def test_no_leg_reports_a_distance_so_none_is_picked(self):
+        """CONNECTION carries no route_distance on any segment. Picking one
+        of its legs arbitrarily is exactly how a regional feeder got
+        returned as the reference flight for Seattle to Tokyo in the first
+        place (flights_between's own docstring) - the first leg listed is
+        typically the short feeder, not the long-haul leg. No ranked
+        candidate means no guess."""
+        c = client({"/flights/to/RJTT": CONNECTION})
+        _, leg = c.route_or_long_haul_leg("KSAN", "RJTT")
+        assert leg is None
+
+    def test_the_longer_leg_by_reported_distance_wins(self):
+        payload = {"flights": [{"segments": [
+            {"ident": "SKW4002", "fa_flight_id": "skw-1",
+             "actual_off": "2026-08-16T22:48:35Z", "route_distance": 100,
+             "origin": {"code": "KSAN"}, "destination": {"code": "KLAX"}},
+            {"ident": "ANA125", "fa_flight_id": "ana-1",
+             "actual_off": "2026-08-17T00:42:55Z", "route_distance": 5100,
+             "origin": {"code": "KLAX"}, "destination": {"code": "RJTT"}},
+        ]}]}
+        c = client({"/flights/to/RJTT": payload})
+        _, leg = c.route_or_long_haul_leg("KSAN", "RJTT")
+        assert leg.ident == "ANA125"
+
+    def test_a_pair_with_no_service_at_all_gets_neither(self):
+        c = client({"/flights/to/RJTT": {"flights": []}})
+        nonstop, leg = c.route_or_long_haul_leg("KSAN", "RJTT")
+        assert nonstop == [] and leg is None
+
+    def test_only_one_request_is_made(self):
+        """The whole point: the connecting itinerary's other legs are
+        already sitting in the response that answered the nonstop
+        question, so this must never be a second call."""
+        c = client({"/flights/to/RJTT": CONNECTION})
+        c.route_or_long_haul_leg("KSAN", "RJTT")
+        assert c.call_log == ["/airports/KSAN/flights/to/RJTT"]

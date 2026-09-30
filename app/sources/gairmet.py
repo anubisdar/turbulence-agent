@@ -251,6 +251,23 @@ def parse_advisory(feature) -> TurbulenceAdvisory | None:
     if not hazard:
         return None
 
+    # Most G-AIRMET hazards (TURB-HI/LO, ICE, IFR, MT OBSC) are AREA
+    # polygons, but the bulletin also carries LINE-geometry products -
+    # FZLVL (the freezing level) and LLWS are contours, not enclosed
+    # regions. parse_ring() has no way to tell a line's points from an
+    # area's; it would parse either into the same list of pairs and hand
+    # back something that looks like a usable ring either way. A LINE
+    # feature's coordinates describing a polygon boundary is exactly the
+    # kind of quiet misread this module's docstring already warns about
+    # for the other two AWC surprises, so an explicit geometryType other
+    # than AREA is never parsed as one - it becomes an advisory with no
+    # ring, which `usable` already treats as absence rather than shape.
+    # Absent entirely (as in a fixture that predates this check, or one
+    # built by hand for a test) is treated as AREA, the historical default.
+    geometry_type = str(props.get("geometryType") or "").strip().upper()
+    ring = (parse_ring(props.get("coords"))
+            if geometry_type in ("", "AREA") else [])
+
     return TurbulenceAdvisory(
         hazard=hazard,
         severity=parse_severity(props.get("severity")),
@@ -262,7 +279,7 @@ def parse_advisory(feature) -> TurbulenceAdvisory | None:
         forecast_hour=(int(props["forecastHour"])
                        if str(props.get("forecastHour", "")).strip().isdigit()
                        else None),
-        ring=parse_ring(props.get("coords")),
+        ring=ring,
         tag=props.get("tag"),
         status=props.get("status"),
     )

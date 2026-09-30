@@ -184,7 +184,7 @@ class CorridorSearchBody(BaseModel):
     dest: str = Field("KBOS", min_length=3, max_length=4,
                       pattern=r"^[A-Za-z0-9]{3,4}$")
     beam_width: int = Field(2, ge=1, le=6)
-    depth_limit: int = Field(2, ge=1, le=4)
+    depth_limit: int = Field(3, ge=1, le=4)
     confidence_threshold: float = Field(0.85, ge=0.0, le=1.5)
     max_tool_calls: int = Field(8, ge=1, le=40,
                                 description="Hard cap on metered API calls")
@@ -209,6 +209,13 @@ class CorridorSearchBody(BaseModel):
         None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
         description="Departure time of day, HH:MM UTC. Selects the reference "
                     "flight by time of day rather than by recency.")
+    flight_number: str | None = Field(
+        None, min_length=2, max_length=10,
+        pattern=r"^[A-Za-z0-9]{2,10}$",
+        description="Optional flight number, e.g. UA1234. When it matches "
+                    "a flown segment on this pair, that flight is pinned "
+                    "as the reference instead of the one nearest "
+                    "departure_time.")
     include_reputation: bool = Field(
         False, description="Also retrieve the NTSB safety record for the "
                            "aircraft type on this route")
@@ -263,6 +270,7 @@ class CorridorSearchBody(BaseModel):
             use_graph=self.use_graph, use_fixtures=self.use_fixtures,
             departure_date=self.departure_date,
             departure_time=self.departure_time,
+            flight_number=self.flight_number,
             include_reputation=self.include_reputation,
             include_turbulence=self.include_turbulence,
             include_explanation=self.include_explanation,
@@ -549,12 +557,24 @@ def chat_trip(body: TripChatBody, request: Request, response: Response
              ) -> dict:
     """Advance the trip conversation by one turn.
 
-    Replaces the four-field form's job, nothing else: this never touches
-    AeroAPI and never spends a metered flight-data call. It costs one
+    Replaces the four-field form's job, nothing else. Costs one
     language-model call per turn, which is why it sits behind the same
     human check as the search itself rather than being left open - an
     anonymous caller looping this is a smaller bill than a corridor
-    search, but it is not a free one.
+    search, but it is not a free one. A turn can also spend one metered
+    AeroAPI call, in any one of three mutually exclusive situations,
+    never more than one per turn: a flight number given with no city or
+    airport at all is looked up for its real route; a flight number
+    given alongside airports that were already known is looked up to
+    check it actually flies that route rather than being pinned on
+    trust; and a trip that completes with no flight number at all gets a
+    short list of real flights on that route offered as suggestions. All
+    three are skipped on a later turn once already done for the same
+    flight number and/or route - an idle, unchanged trip never spends a
+    second call for the same answer. Any other turn still touches
+    nothing but the model. See app.web.tripchat for why a route is
+    looked up, checked, or suggested rather than guessed the way a city
+    name is.
 
     Stateless. The caller (the page) holds the conversation and resends
     it whole each turn; nothing is kept here between requests.
@@ -572,6 +592,8 @@ def chat_trip(body: TripChatBody, request: Request, response: Response
         "reply": result.reply,
         "complete": result.complete,
         "trip": result.trip,
+        "flight_number": result.flight_number,
+        "upcoming_flights": result.upcoming_flights,
         "resolution": {
             "origin": result.origin_resolution.note()
                       if result.origin_resolution else None,

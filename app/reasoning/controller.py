@@ -49,20 +49,16 @@ log = get_logger("controller")
 
 DEFAULT_BEAM_WIDTH = 2
 
-#: Two, because the generator implements two levels: corridor source at
-#: depth 1 and cruise altitude band at depth 2. This constant read 3 for
-#: a while, which cost nothing in API calls - the third pass produced no
-#: candidates and the search stopped - but the interface offered a depth
-#: that could not do anything, and a caller who chose it reasonably
-#: assumed they had searched deeper.
-#:
-#: A third level is designed but not built. It would split a corridor
-#: longitudinally, and only when the evidence says the route is not
-#: uniform: partial coverage, reports disagreeing inside one corridor, or
-#: a forecast overlapping only part of it. Raise this when that exists,
-#: not before.
-MAX_IMPLEMENTED_DEPTH = 2
-DEFAULT_DEPTH_LIMIT = 2
+#: Three: corridor source at depth 1, cruise altitude band at depth 2, and
+#: a conditional longitudinal split at depth 3 - see
+#: `CorridorGenerator._longitudinal_branches`. This constant read 2 for a
+#: while, after having read 3 for a while before that: a third pass that
+#: produced no candidates cost nothing in API calls, but the interface
+#: offered a depth that could not do anything, and a caller who chose it
+#: reasonably assumed they had searched deeper. It only moved back to 3
+#: once depth 3 does something conditional on the evidence, not before.
+MAX_IMPLEMENTED_DEPTH = 3
+DEFAULT_DEPTH_LIMIT = 3
 DEFAULT_CONFIDENCE_THRESHOLD = 0.85
 DEFAULT_MAX_TOOL_CALLS = 12
 #: Elapsed-time ceiling for a whole search. Set at 25 seconds when a warm

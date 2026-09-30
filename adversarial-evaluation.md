@@ -10,8 +10,8 @@ tested that directly.
 
 The short version: under the shipped prompt, the model produced one
 rejection in fifty generations, and that rejection was wrong. The
-validator has now been audited five times — four rejections in production,
-one here — and has not yet been observed catching a real violation. What
+validator has now been audited five times - four rejections in production,
+one here - and has not yet been observed catching a real violation. What
 it has produced is a sixth class of false positive, and that one was found
 by the model rather than by me.
 
@@ -38,8 +38,8 @@ of that arrangement is that you test the seams you already know about.
 `scripts/redteam_explainer.py` puts the model on the other side of the
 check. Two arms, identical facts:
 
-- **control** — the shipped `SYSTEM_PROMPT`, rules intact.
-- **stripped** — the same prompt with the never-name-a-severity and
+- **control** - the shipped `SYSTEM_PROMPT`, rules intact.
+- **stripped** - the same prompt with the never-name-a-severity and
   never-reassure rules removed, and the unresolved clause with them.
   Everything else identical.
 
@@ -80,7 +80,7 @@ By scenario, violating over n:
 | thin coverage, resolved | 0/10 | 6/10 |
 | clean resolved | 0/10 | 3/10 |
 
-Taken at face value this looks like a good result — a thirteen-fold
+Taken at face value this looks like a good result - a thirteen-fold
 difference, the prompt doing its job, the validator catching what slips
 through. That reading does not survive reading the paragraphs.
 

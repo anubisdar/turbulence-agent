@@ -51,7 +51,7 @@ from app.runs import (
 from app.retrieval.airports import Airport, resolve_pair
 from app.reasoning.controller import (MAX_IMPLEMENTED_DEPTH, Budget,
                                       SearchResult, search)
-from app.reasoning.critic import Corridor
+from app.reasoning.critic import Corridor, Severity
 from app.reasoning.generator import CorridorGenerator
 from app.reasoning.geometry import (
     CorridorShape,
@@ -200,15 +200,23 @@ class SearchRequest:
     origin: str = "KPIT"
     dest: str = "KBOS"
     beam_width: int = 2
-    depth_limit: int = 2
+    depth_limit: int = 3
     confidence_threshold: float = 0.85
     max_tool_calls: int = 12
     max_seconds: float = 60.0
     width_nm: float = 25.0
     use_graph: bool = True
     use_fixtures: bool = False
-    departure_time: str | None = None      # "HH:MM" UTC
+    #: "HH:MM" UTC, always - a passenger's own local time is converted to
+    #: this before it ever reaches here. The trip chat does that
+    #: conversion (see app.web.tripchat._resolve_local_time); a direct API
+    #: caller is responsible for sending UTC itself, same as before.
+    departure_time: str | None = None
     departure_date: str | None = None      # "YYYY-MM-DD", recorded not queried
+    #: Optional. When it matches a flown segment on this pair, the search
+    #: pins that exact flight as the reference instead of picking one by
+    #: departure_time. Never required.
+    flight_number: str | None = None
     include_reputation: bool = False
     #: On by default. Turning it off leaves every reading unresolved, which
     #: is honest but is not what the agent is for.
@@ -368,6 +376,100 @@ def _explain(payload: dict[str, Any], enabled: bool) -> dict[str, Any]:
             "tokens_in": out.tokens_in, "tokens_out": out.tokens_out}
 
 
+def _winner_reading(result: SearchResult) -> Severity:
+    """The selected corridor's own turbulence reading.
+
+    Distinct from `result.reading` (`final_reading()`), which is the worst
+    reading among every corridor that survived the beam - not necessarily
+    the winner. That distinction used to be invisible: the top-line
+    "outcome.reading" the page showed as the headline verdict was
+    `result.reading`, while the sources panel and the model's explanation
+    right below it both described the winner's own evidence. When some
+    other surviving-but-unselected corridor happened to score worse, the
+    headline read SEVERE over a paragraph explaining, correctly, why the
+    selected route was MODERATE - each number was right for what it
+    measured, but the page presented them as the same number. The winner's
+    own reading is what belongs in the headline; the beam-wide worst is a
+    separate, clearly-labelled signal (see the note added in
+    `_run_corridor_search`), not a silent substitute for it.
+    """
+    return result.winner.evidence.reading if result.winner else Severity.UNRESOLVED
+
+
+def _worst_survivor_note(result: SearchResult,
+                         winner_reading: Severity) -> str | None:
+    """The note that used to be missing entirely.
+
+    None whenever there is nothing to say: no winner, or the beam-wide
+    worst (`result.reading`) is the same reading as the winner's own, or
+    unresolved (nothing to compare against). Otherwise, plain language for
+    the gap `_winner_reading` exists to stop from reaching the headline
+    silently.
+    """
+    if not result.winner or result.reading is winner_reading \
+            or result.reading is Severity.UNRESOLVED:
+        return None
+    return (f"Corridors disagree: a different one considered during this "
+            f"search, but not selected, was rated worse "
+            f"({result.reading.value}) than the selected route's own "
+            f"reading ({winner_reading.value}). The reading shown above is "
+            f"for the selected route only; see the corridor list for the "
+            f"others.")
+
+
+#: Labels `CorridorGenerator._longitudinal_branches` gives its two children.
+#: Checked by value rather than by a dedicated flag on `Corridor`, matching
+#: how "low band"/"high band" already distinguish altitude branches - label
+#: is already the traceability field for what kind of child a corridor is.
+_SPLIT_LABELS = {"first half", "second half"}
+
+
+def _partial_route_note(result: SearchResult) -> str | None:
+    """Say so, deterministically, when the winner covers only part of the
+    trip.
+
+    A depth-3 winner can be a longitudinal split - half of the corridor the
+    passenger actually asked about, kept because the evidence said the
+    route was not uniform. That is the right corridor to prefer, but a
+    reading headlined as "PIT to BOS: moderate" with no further qualifier
+    would be read as covering the whole flight. This does not depend on
+    the explainer running or its guardrail passing - the same silent gap
+    `_worst_survivor_note` exists to close, for a different way a winner's
+    reading can need a caveat the headline alone cannot carry.
+    """
+    if not result.winner or result.winner.label not in _SPLIT_LABELS:
+        return None
+    return (f"This reading covers the {result.winner.label} of the route "
+            f"only - the corridor was split lengthwise because the "
+            f"evidence was not uniform along it. See the corridor list for "
+            f"the other half.")
+
+
+def _route_substitution_note(generator) -> str | None:
+    """Say so, deterministically, when the search ran on a different pair
+    than the one requested.
+
+    A pair with no nonstop service of its own (San Diego to Tokyo) gets
+    searched on the long-haul leg of a real connecting itinerary instead
+    (KLAX to RJTT) - see `CorridorGenerator._get_flight`. Every corridor in
+    the response describes that leg, not the door-to-door trip, and a
+    headline reading with no further qualifier would be read as covering
+    the whole requested pair. This does not depend on the explainer
+    running - the same silent gap `_partial_route_note` and
+    `_worst_survivor_note` exist to close, for a different way a reading
+    can need a caveat the headline alone cannot carry.
+    """
+    sub = generator.route_substitution
+    if sub is None:
+        return None
+    req_origin, req_dest, searched_origin, searched_dest = sub
+    return (f"{req_origin} to {req_dest} has no nonstop service, so this "
+            f"search ran on {searched_origin} to {searched_dest} instead - "
+            f"the long-haul leg of a real connecting itinerary. Every "
+            f"corridor below describes that leg, not the full "
+            f"{req_origin}-{req_dest} trip.")
+
+
 def _turbulence_summary(result: SearchResult, generator) -> dict[str, Any]:
     """The winning corridor's two readings, kept separate.
 
@@ -500,8 +602,7 @@ def run_corridor_search(req: SearchRequest, api_key: str | None,
         depth_note = (
             f"Depth {req.depth_limit} was requested; the generator "
             f"implements {MAX_IMPLEMENTED_DEPTH} levels, so the search ran "
-            f"to {MAX_IMPLEMENTED_DEPTH}. A third level is designed and not "
-            f"built.")
+            f"to {MAX_IMPLEMENTED_DEPTH}.")
         req = replace(req, depth_limit=MAX_IMPLEMENTED_DEPTH)
 
     o_air, d_air = resolve_pair(req.origin, req.dest)
@@ -591,6 +692,7 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
             client=client, conn=conn,
             origin=o_air.code, dest=d_air.code,
             width_nm=req.width_nm, target_time=req.departure_time,
+            flight_number=req.flight_number,
             when=forecast_when,
             fetch_pireps=fetch_pireps, gairmet_client=gairmet_client,
         )
@@ -613,6 +715,20 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
             for corridor in level.generated:
                 corridors_by_id[corridor.id] = corridor
 
+        # See _winner_reading: the headline verdict is the selected route's
+        # own reading, not the worst among every corridor that survived the
+        # beam.
+        winner_reading = _winner_reading(result)
+        worst_note = _worst_survivor_note(result, winner_reading)
+        if worst_note:
+            wx_notes.append(worst_note)
+        partial_note = _partial_route_note(result)
+        if partial_note:
+            wx_notes.append(partial_note)
+        substitution_note = _route_substitution_note(generator)
+        if substitution_note:
+            wx_notes.append(substitution_note)
+
         meta = _corridor_meta(result, corridors_by_id, generator.shapes)
         cache_after = cache_stats(conn)
         aircraft = _aircraft_from(generator)
@@ -623,11 +739,25 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
             timings.retrieval_seconds = round(
                 time.perf_counter() - retrieval_started, 4)
 
+        # None for the overwhelming common case - a pair with its own
+        # nonstop service. Set only when CorridorGenerator._get_flight
+        # substituted a connecting itinerary's long-haul leg; see
+        # _route_substitution_note for why the map needs to know this as a
+        # field, not just as prose in the notes list.
+        route_substitution = None
+        if generator.route_substitution:
+            req_o, req_d, searched_o, searched_d = generator.route_substitution
+            route_substitution = {
+                "requested": {"origin": req_o, "dest": req_d},
+                "searched": {"origin": searched_o, "dest": searched_d},
+            }
+
         payload = {
             "request": {
                 "origin": o_air.code, "dest": d_air.code,
                 "typed_origin": o_air.typed, "typed_dest": d_air.typed,
                 "resolution_notes": resolution_notes,
+                "route_substitution": route_substitution,
                 "beam_width": req.beam_width, "depth_limit": req.depth_limit,
                 "confidence_threshold": req.confidence_threshold,
                 "max_tool_calls": req.max_tool_calls,
@@ -651,7 +781,16 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
                 "calls_used": result.calls_used,
                 "elapsed_seconds": result.elapsed,
                 "winner": result.winner.id if result.winner else None,
-                "reading": result.reading.value,
+                # The selected corridor's own reading - what the sources
+                # panel and the explanation below it both describe. See
+                # _winner_reading.
+                "reading": winner_reading.value,
+                # The worst reading among every corridor that survived the
+                # beam, kept under its own name rather than folded into
+                # "reading" - conservative, but about a route that might not
+                # be the one shown. A note above explains the gap whenever
+                # this differs from "reading".
+                "worst_survivor_reading": result.reading.value,
                 "survivors": [c.id for c in result.survivors],
                 "turbulence": _turbulence_summary(result, generator),
                 # Distinct from `truncated`. A truncated search was stopped
@@ -714,7 +853,8 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
             stop=result.stop.value, truncated=result.truncated,
             nodes=result.nodes_generated, calls=result.calls_used,
             elapsed=result.elapsed, winner=result.winner.id if result.winner else None,
-            reading=result.reading.value,
+            reading=winner_reading.value,
+            worst_survivor_reading=result.reading.value,
             contested=result.contested))
         if result.truncated:
             log.warning("search stopped on a budget rather than confidence "
@@ -733,7 +873,7 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
                         + kv(failures=len(generator.degraded),
                              nodes=result.nodes_generated,
                              first=generator.degraded[0]))
-        if result.reading.value == "unresolved":
+        if winner_reading is Severity.UNRESOLVED:
             log.info("no turbulence reading established "
                      + kv(observed=(payload["outcome"]["turbulence"] or {})
                           .get("observed", {}).get("reading"),
