@@ -58,18 +58,16 @@ Every other design choice follows from that first one:
 
 ## Architecture
 
-Six roles. Two are language models, and both are at the systen edges. Everything
+Six roles. Two are language models, and both are at the system edges. Everything
 that decides anything is deterministic Python.
-
-One of those two language models is specified but not implemented - a form
-handles that today - so only one is running.
 
 ```
               Origin, destination, time
                         |
               +---------v----------+
-              :    Trip parser     :  language model - NOT BUILT
-              : free text -> search:  a form does this today
+              |     Trip chat      |  language model
+              | free text -> trip, |
+              | never the reading  |
               +---------+----------+
                         |
   +---------------------v----------------------+
@@ -97,6 +95,45 @@ handles that today - so only one is running.
 
 **The model doesn't touch the number.** The explainer is called after the
 reading already exists; it writes prose about a value it cannot change.
+
+### The intake layer
+
+A chat front end replaces the origin/destination form. Every turn replays
+the whole conversation to Claude Sonnet 5, which is forced (via tool use) to
+call a single `record_trip` function with whatever it currently knows -
+origin, destination, departure date and time, and an optional flight number.
+Nothing is kept server-side between turns; the page holds the conversation
+and resends it in full.
+
+The model's only job is extraction, not resolution: it translates a city or
+airport name to an IATA/ICAO code itself, but the code is not trusted until
+a downstream lookup resolves it against a real airport table. A bare flight
+number with no city at all ("I'm on UA1234") is left unresolved by the model
+on purpose - AeroAPI looks up the flight's actual route, and asks the user
+for airports itself only if that lookup comes up empty, so nobody answers
+the same question twice.
+
+This layer can spend one metered AeroAPI call per turn, in three mutually
+exclusive situations, each skipped on a later turn once already answered
+for the same flight number or route:
+
+- a bare flight number with no known airports is looked up for its route
+- a flight number given alongside airports already known is checked against
+  its real route rather than pinned on trust, and flagged if it disagrees
+- a trip that completes with **no** flight number gets a short list of real
+  upcoming flights on that route offered as suggestions, since not knowing
+  your flight number is the common case, not the edge one
+
+None of these three ever block completion or get trusted as ground truth -
+picking a suggested flight, or having one verified, reaches the same
+`flight_number` field a typed one does, and the corridor search matches it
+against real segments the same way regardless of how it got there. AeroAPI
+network failures (timeouts, DNS, refused connections) degrade to "couldn't
+look that up" rather than a raw 500, and the upcoming-flights suggestion
+specifically runs on a much shorter timeout than an explicit lookup does,
+since it fires silently on every completed trip rather than only when the
+user asked for something - missing it is a shrug, hanging the reply on it
+is not.
 
 ### The reasoning layer
 
@@ -161,6 +198,7 @@ app/
   logging_setup.py       syslog handler, request ids, credential redaction
   web/
     service.py           orchestration: resolve -> search -> evidence -> explain
+    tripchat.py          chat intake: free text -> record_trip, stateless
     static/              the search page and the status page
   reasoning/
     generator.py         corridor candidates from flight data
@@ -189,7 +227,7 @@ scripts/
   dominance_analysis.py  is the 0.80 threshold load-bearing?
   check_edge.sh          hourly edge health check
 
-tests/                   ~1,269 tests
+tests/                   ~1,381 tests
 ```
 
 ---
@@ -248,9 +286,12 @@ any test fails**.
 
 ## Usage
 
-Type two airport codes. Three or four letters both work: `PIT` resolves to
-`KPIT`, `ANC` to `PANC`, `NRT` to `RJAA`. The interface tells you what it
-resolved to.
+Tell the chat where you're flying from and to, in plain text - a city, an
+airport, or a code. Three or four letters both work: `PIT` resolves to
+`KPIT`, `ANC` to `PANC`, `NRT` to `RJAA`, and the interface tells you what it
+resolved to. A date and time are optional, and so is a flight number - if
+you don't have one, the chat offers real upcoming flights on the route once
+it resolves, and clicking one pins it the same way typing it would.
 
 The result page has six tabs:
 
@@ -345,10 +386,11 @@ system so no bug inside it can raise the ceiling.
   so rather than answering about now.
 - **Nonstop routes only** - a pair with no nonstop service reports that the
   geometric path is not a real route.
-- **The trip parser is specified but not written.** It is a designed role
-  with no code behind it; the search form covers the same ground. Building
-  it would place a second language model at the input edge, where a wrong
-  parse degrades an explanation rather than corrupting a score.
+- **No held-out evaluation of the trip chat's extraction accuracy.** It
+  places a second language model at the input edge, by design where a wrong
+  parse degrades a conversation rather than corrupting a score - but unlike
+  the reasoning layer, nothing here measures how often it gets a real
+  conversation right.
 
 ---
 

@@ -43,7 +43,20 @@ if [[ -f data/retrieval.db ]]; then
 else
   say "no data/retrieval.db - the safety record lookup will not work"
 fi
-if ! python3 -m pytest tests/ -q >/dev/null 2>&1; then
+# Hermetic regardless of what this shell has sourced. A terminal that has
+# ever run `set -a && . turbulence-agent.env` (to get AEROAPI_KEY into the
+# shell for this very deploy, say) keeps real TURNSTILE_SITE_KEY/SECRET_KEY
+# and TURBULENCE_PUBLIC exported for the rest of that session -
+# app/web/api.py and turnstile.py read those live, so the suite's in-process
+# TestClient starts requiring a challenge no test sends, this gate reports
+# "tests are failing" on a suite that is not actually broken, and the deploy
+# is refused before it ever touches the remote host. Same fix already
+# applied to weekly_check.sh and install_drop.sh's own separate pytest
+# calls, for the same reason, found the same way: a real run in a shell
+# that had sourced the env file, not just a read of the script.
+if ! env -u TURNSTILE_SITE_KEY -u TURNSTILE_SECRET_KEY -u TURBULENCE_PUBLIC \
+       -u TURBULENCE_SESSION_SECRET -u TURBULENCE_OPERATOR_TOKEN \
+       python3 -m pytest tests/ -q >/dev/null 2>&1; then
   echo "  tests are failing. Fix before deploying." >&2
   exit 1
 fi
@@ -70,8 +83,19 @@ fi
 head_ "Installing on the remote"
 ssh "${SSH_OPTS[@]}" "$HOST" "sudo bash -s" <<REMOTE
 set -euo pipefail
+# --delete mirrors the destination to exactly what was synced (app/,
+# scripts/, tests/, pyproject.toml), removing anything else under
+# REMOTE_DIR unless it's excluded - which is why data/, .venv/ and
+# .cache/ are already protected below. .venv-checks/ (the isolated venv
+# the weekly check runs from, so a stale test-only dependency never
+# touches the app's own .venv) and reports/ (that check's own history)
+# are created on the remote after a deploy, never by one, so without
+# their own exclude here this same rsync would silently delete both on
+# the very next deploy - no error, no warning, just a broken cron the
+# following week and a wiped report history.
 rsync -a --delete /tmp/turbulence-sync/ $REMOTE_DIR/ \
-  --exclude 'data/' --exclude '.venv/' --exclude '.cache/'
+  --exclude 'data/' --exclude '.venv/' --exclude '.cache/' \
+  --exclude '.venv-checks/' --exclude 'reports/'
 if [[ -f /tmp/turbulence-sync-db ]]; then
   mkdir -p $REMOTE_DIR/data
   mv /tmp/turbulence-sync-db $REMOTE_DIR/data/retrieval.db

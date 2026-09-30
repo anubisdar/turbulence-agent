@@ -244,7 +244,19 @@ for mod in sqlite_vec sentence_transformers langgraph; do
 done
 
 head_ "Running tests"
-python3 -m pytest tests/ -q
+# Hermetic regardless of what this shell has sourced. A terminal that has
+# ever run `set -a && . turbulence-agent.env` (testing the weekly-check
+# cron line by hand, say) keeps real TURNSTILE_SITE_KEY/SECRET_KEY and
+# TURBULENCE_PUBLIC exported for the rest of that session - app/web/api.py
+# and turnstile.py read those live, so the suite's in-process TestClient
+# starts requiring a challenge no test sends, and dozens of unrelated
+# assertions fail with "needs the challenge" instead of their real cause.
+# This is the same fix scripts/weekly_check.sh already needed, for the
+# same reason: a false "tests are broken" reading right at the install
+# gate is worse than a slow one.
+env -u TURNSTILE_SITE_KEY -u TURNSTILE_SECRET_KEY -u TURBULENCE_PUBLIC \
+    -u TURBULENCE_SESSION_SECRET -u TURBULENCE_OPERATOR_TOKEN \
+    python3 -m pytest tests/ -q
 
 head_ "Done"
 say "backups: ${BACKUP_DIR#$PROJ/}"

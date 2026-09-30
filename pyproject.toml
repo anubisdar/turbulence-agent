@@ -9,3 +9,14 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.pytest.ini_options]
+# Cosmetic only - Starlette's TestClient uses httpx internally and nags
+# that httpx2 is preferred. It's not a failure and doesn't affect any
+# test's outcome; it just clutters every weekly_check.sh report's
+# warnings summary. Narrowly scoped to that one message so an unrelated
+# real DeprecationWarning elsewhere still surfaces normally.
+filterwarnings = [
+	"ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"
+]
+
