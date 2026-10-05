@@ -435,6 +435,22 @@ class TestReputationToggle:
         assert "not an absence of events" in rep["reason"]
 
 
+    def test_the_absence_names_which_step_failed(self):
+        from app.web.service import _reputation_for
+        none_found = _reputation_for(None, "nonexistent.db")["reason"]
+        assert "No reference flight was found" in none_found
+        no_type = _reputation_for(
+            {"ident": "JBU2454", "icao_designator": None, "resolved": False},
+            "nonexistent.db")["reason"]
+        assert "JBU2454 has no aircraft type assigned" in no_type
+        unmapped = _reputation_for(
+            {"ident": "X1", "icao_designator": "ZZZZ", "resolved": False},
+            "nonexistent.db")["reason"]
+        assert "ZZZZ is not mapped" in unmapped
+        for reason in (none_found, no_type, unmapped):
+            assert "not an absence of events" in reason
+
+
 class TestNarration:
     """The narration exists because the agent's best properties are invisible
     in its output. It is derived from the finished payload, so it can describe

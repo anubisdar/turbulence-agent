@@ -323,6 +323,58 @@ class TestFlightNumberPin:
         assert flight.ident == "RPA5678"
         assert any("hasn't flown yet" in n for n in gen.notes)
 
+    def test_a_flight_missing_from_the_pair_listing_is_found_by_ident(self):
+        # Regression for JBU2454 KDCA-KBOS: the pair listing held only
+        # upcoming departures, so nothing in it had flown and the reference
+        # flight (and its aircraft type) came back empty even though the
+        # flight itself had already departed and has a type.
+        upcoming_only = {"flights": [
+            {"segments": [{"ident": "JBU2454", "fa_flight_id": "up-1",
+                          "aircraft_type": "BCS3", "actual_off": None,
+                          "origin": {"code": "KPIT"},
+                          "destination": {"code": "KBOS"}}]},
+        ]}
+        by_ident = {"flights": [
+            {"ident": "JBU2454", "fa_flight_id": "JBU2454-x",
+             "aircraft_type": "BCS3",
+             "actual_off": "2026-10-04T15:13:09Z",
+             "origin": {"code": "KPIT"}, "destination": {"code": "KBOS"}},
+            {"ident": "JBU2454", "fa_flight_id": "up-1",
+             "aircraft_type": "BCS3", "actual_off": None,
+             "scheduled_out": "2026-10-05T15:00:00Z",
+             "origin": {"code": "KPIT"}, "destination": {"code": "KBOS"}},
+        ]}
+        gen, _ = make_gen({"/flights/to/KBOS": upcoming_only,
+                           "/flights/JBU2454": by_ident})
+        gen = dataclasses.replace(gen, flight_number="JBU2454")
+        flight = gen._get_flight(Budget(max_tool_calls=12))
+        assert flight is not None
+        assert flight.fa_flight_id == "JBU2454-x"
+        assert flight.aircraft_type == "BCS3"
+        assert any("looked up directly" in n for n in gen.notes)
+
+    def test_by_ident_result_on_another_pair_is_not_used(self):
+        # A reused flight number must not lend its track to a different
+        # route.
+        elsewhere = {"flights": [
+            {"ident": "JBU2454", "fa_flight_id": "other-1",
+             "aircraft_type": "BCS3",
+             "actual_off": "2026-10-04T15:13:09Z",
+             "origin": {"code": "KJFK"}, "destination": {"code": "KMCO"}},
+        ]}
+        gen, _ = make_gen({"/flights/JBU2454": elsewhere})
+        gen = dataclasses.replace(gen, flight_number="JBU2454")
+        flight = gen._get_flight(Budget(max_tool_calls=12))
+        assert flight is not None
+        assert flight.fa_flight_id != "other-1"
+
+    def test_by_ident_failure_falls_back_as_before(self):
+        gen, _ = make_gen()  # no /flights/DL9999 payload -> 404
+        gen = dataclasses.replace(gen, flight_number="DL9999")
+        flight = gen._get_flight(Budget(max_tool_calls=12))
+        assert flight is not None
+        assert any("No recent" in n and "DL9999" in n for n in gen.notes)
+
     def test_no_flight_number_behaves_exactly_as_before(self):
         gen, _ = make_gen()
         flight = gen._get_flight(Budget(max_tool_calls=12))

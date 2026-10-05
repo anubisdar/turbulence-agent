@@ -342,6 +342,16 @@ class CorridorGenerator:
                     f"the flight number given, rather than chosen by "
                     f"departure time."
                 )
+            elif (by_ident := self._flown_by_ident(budget)) is not None:
+                self._flight = by_ident
+                pinned = True
+                self._note(
+                    f"{by_ident.ident} was not in the airport-pair listing "
+                    f"(that listing is upcoming departures, so a flight "
+                    f"that already left is usually absent), so the flight "
+                    f"was looked up directly. Reference flight pinned to "
+                    f"its departure at {by_ident.actual_off}."
+                )
             else:
                 unflown_match = _match_flight_number(
                     self._segments, self.flight_number)
@@ -391,6 +401,32 @@ class CorridorGenerator:
                     f"being smooth."
                 )
         return self._flight
+
+    def _flown_by_ident(self, budget: Budget) -> FlightSegment | None:
+        """A departed instance of `flight_number`, looked up directly.
+
+        The airport-pair listing (`/airports/{a}/flights/to/{b}`) is
+        upcoming departures. Late in the day a flight that already left
+        is not on the page, so `flown` can be empty even though the
+        flight the person named has a track. `/flights/{ident}` has it.
+
+        Accepted only if it has departed (a track exists) and flies the
+        pair being searched: a flight number reused on another route must
+        not become the reference for this one. Any failure returns None
+        and the caller falls back exactly as before.
+        """
+        if not self.flight_number or not budget.spend():
+            return None
+        try:
+            seg = self.client.flight_by_ident(self.flight_number)
+        except AeroAPIError:
+            return None
+        if seg is None or not seg.has_flown:
+            return None
+        if (seg.origin or "").upper() != self.origin.upper() \
+                or (seg.destination or "").upper() != self.dest.upper():
+            return None
+        return seg
 
     # ------------------------------------------------------------ depth 1
 

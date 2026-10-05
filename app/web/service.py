@@ -950,14 +950,21 @@ def _reputation_for(aircraft: dict | None, db_path: str,
     type would be worse than returning nothing.
     """
     if not aircraft or not aircraft.get("resolved"):
+        designator = (aircraft or {}).get("icao_designator")
+        if not aircraft:
+            cause = ("No reference flight was found for this search, so "
+                     "there was no aircraft type to look up")
+        elif not designator:
+            cause = (f"Flight {aircraft.get('ident') or 'unknown'} has no "
+                     f"aircraft type assigned in the flight data")
+        else:
+            cause = (f"Aircraft type {designator} is not mapped to a type "
+                     f"in the NTSB corpus")
         return {
             "available": False,
             "reason": (
-                f"Aircraft type "
-                f"{(aircraft or {}).get('icao_designator') or 'unknown'} could "
-                f"not be resolved to a type in the NTSB corpus, so no safety "
-                f"record was retrieved. This is an absence of lookup, not an "
-                f"absence of events."
+                f"{cause}, so no safety record was retrieved. This is an "
+                f"absence of lookup, not an absence of events."
             ),
         }
     label = aircraft["variant"] or aircraft["family"]
