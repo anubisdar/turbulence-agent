@@ -163,6 +163,15 @@ class SearchResult:
     calls_used: int = 0
     elapsed: float = 0.0
     notes: list[str] = field(default_factory=list)
+    #: Every corridor that was ever enriched with evidence, keyed by id -
+    #: not just the final depth's survivors. A corridor kept at depth 2 and
+    #: then split further at depth 3 still had its own gather_for_survivors
+    #: call at depth 2; that enriched object lives only here once depth 3
+    #: overwrites `survivors`/`frontier`. Without it, an intermediate node's
+    #: evidence is gathered, used to decide whether to split it, logged in a
+    #: note - and then unreachable, leaving its reading stuck at whatever
+    #: level.generated's pre-enrichment copy says (unresolved by default).
+    enriched: dict[str, Corridor] = field(default_factory=dict)
 
     @property
     def winner(self) -> Corridor | None:
@@ -297,6 +306,7 @@ def search(
             frontier = list(enrich(frontier, budget))
             for c in frontier:
                 by_id[c.id] = c
+                result.enriched[c.id] = c
 
         result.survivors = list(frontier)
         result.reading = final_reading(beam, list(by_id.values()))

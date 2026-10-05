@@ -714,6 +714,31 @@ def _run_corridor_search(req: SearchRequest, api_key: str | None,
         for level in result.levels:
             for corridor in level.generated:
                 corridors_by_id[corridor.id] = corridor
+        # Corridor is frozen (see critic.py), so generator.gather_for_survivors
+        # - called inside the search itself, see controller.search - cannot
+        # attach evidence by mutating a survivor in place. It calls
+        # replace(corridor, evidence=...), which returns a NEW object.
+        # level.generated above holds the original, pre-enrichment objects,
+        # each with the default unresolved Evidence(). Without this overlay,
+        # every corridor's "reading" in the response - including the
+        # winner's - was always "unresolved" no matter what evidence search
+        # actually found; only outcome.reading (_winner_reading, below) was
+        # ever right, because it reads result.winner.evidence directly
+        # rather than going through this dict.
+        #
+        # result.enriched, not just result.survivors: evidence is gathered
+        # at every depth, for that depth's whole kept frontier, before the
+        # search decides whether to split it further - so a corridor kept
+        # at depth 2 and then split into children at depth 3 still had its
+        # own enriched object, which `survivors` (the final depth's
+        # frontier only) no longer holds once depth 3 overwrites it. Using
+        # survivors alone left every superseded intermediate node's reading
+        # stuck at unresolved even when its own evidence (and its own
+        # generator note describing what was found) said otherwise - found
+        # by the map's "not evaluated" pill firing on a corridor whose own
+        # trace popup described a real forecast match.
+        for corridor in result.enriched.values():
+            corridors_by_id[corridor.id] = corridor
 
         # See _winner_reading: the headline verdict is the selected route's
         # own reading, not the worst among every corridor that survived the

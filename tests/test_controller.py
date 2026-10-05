@@ -4,6 +4,8 @@ The controller is control flow only, so these exercise expansion, pruning,
 termination, and traceability - never scoring, which belongs to the critic.
 """
 
+from dataclasses import replace
+
 import pytest
 
 from app.reasoning.controller import (
@@ -229,6 +231,46 @@ class TestTraceability:
                      confidence_threshold=NO_EARLY_STOP,
                      budget=Budget(max_tool_calls=50))
         assert res.nodes_generated == 8
+
+
+class TestEnrichedSurvivesSplitting:
+    """A corridor kept at one depth, enriched, and then split into children
+    at the next depth is no longer in result.survivors - that only holds
+    the final depth's frontier. Its enriched object (the one with real
+    evidence, not level.generated's pre-enrichment copy) has to live
+    somewhere once the children take over. See SearchResult.enriched and
+    the overlay in app/web/service.py that reads from it."""
+
+    def _enrich_to_moderate(self, corridors, budget):
+        return [replace(c, evidence=Evidence(reading=Severity.MODERATE))
+                for c in corridors]
+
+    def test_a_split_intermediate_node_keeps_its_enriched_reading(self):
+        res = search(fanout_generator(), beam_width=2, depth_limit=2,
+                     confidence_threshold=NO_EARLY_STOP,
+                     budget=Budget(max_tool_calls=50),
+                     enrich=self._enrich_to_moderate)
+
+        depth1_kept_ids = {s.corridor_id for s in res.levels[0].kept}
+        survivor_ids = {c.id for c in res.survivors}
+        # The fixture: depth 1's winners each expand into depth-2 children
+        # with different ids, so depth 1's own ids never make it into the
+        # final survivors - this is what makes them "intermediate."
+        assert depth1_kept_ids and not (depth1_kept_ids & survivor_ids)
+
+        for cid in depth1_kept_ids:
+            assert cid in res.enriched, (
+                f"{cid} was kept and enriched at depth 1 before being split "
+                f"at depth 2 - its evidence should not disappear with it")
+            assert res.enriched[cid].evidence.reading == Severity.MODERATE
+
+    def test_final_survivors_are_also_in_enriched(self):
+        res = search(fanout_generator(), beam_width=2, depth_limit=2,
+                     confidence_threshold=NO_EARLY_STOP,
+                     budget=Budget(max_tool_calls=50),
+                     enrich=self._enrich_to_moderate)
+        for c in res.survivors:
+            assert res.enriched[c.id] is c
 
 
 class TestBudgetAccounting:

@@ -51,6 +51,7 @@ class SearchState(TypedDict, total=False):
     candidates: list[Corridor]
     levels: list[Level]
     survivors: list[Corridor]
+    enriched: dict[str, Corridor]
     reading: Severity
     stop: Stop | None
     notes: list[str]
@@ -70,6 +71,7 @@ def initial_state(
         candidates=[],
         levels=[],
         survivors=[],
+        enriched={},
         reading=Severity.UNRESOLVED,
         stop=None,
         notes=[],
@@ -149,11 +151,19 @@ def build_graph(
         by_id = {c.id: c for c in candidates}
         frontier = [by_id[s.corridor_id] for s in beam.kept]
 
-        # Survivors only, matching the plain loop. See controller.search.
+        # Evidence is gathered for every depth's frontier, not just the
+        # final one - and every enriched object is kept in `enriched`,
+        # not just the last depth's `survivors`. See controller.search
+        # and SearchResult.enriched: a node kept here and split further
+        # at the next depth still had its own evidence pass, and that
+        # object is otherwise unreachable once `frontier`/`survivors` is
+        # overwritten by the next depth.
+        enriched = dict(state.get("enriched", {}))
         if enrich and frontier:
             frontier = list(enrich(frontier, budget))
             for c in frontier:
                 by_id[c.id] = c
+                enriched[c.id] = c
 
         stop: Stop | None = None
         if not frontier:
@@ -167,6 +177,7 @@ def build_graph(
             "levels": state["levels"] + [level],
             "frontier": frontier,
             "survivors": list(frontier),
+            "enriched": enriched,
             "reading": final_reading(beam, list(by_id.values())),
             "notes": state["notes"] + list(beam.notes),
             "stop": stop,
@@ -191,6 +202,7 @@ def to_result(state: SearchState, budget: Budget) -> SearchResult:
     result = SearchResult(
         levels=list(state.get("levels", [])),
         survivors=list(state.get("survivors", [])),
+        enriched=dict(state.get("enriched", {})),
         reading=state.get("reading", Severity.UNRESOLVED),
         stop=state.get("stop") or Stop.DEPTH_LIMIT,
         depth_reached=len([lv for lv in state.get("levels", [])]),

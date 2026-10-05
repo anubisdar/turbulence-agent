@@ -323,6 +323,28 @@ class TestLegitimateOutput:
         v = verdict(text, **RESOLVED_LIGHT)
         assert v.ok, v.reasons
 
+    def test_a_thin_coverage_caveat_in_other_words_is_accepted(self):
+        """Fixed 2026-10-02. A real KBOS-KPIT production paragraph gave the
+        coverage fraction outright - "account for only about 10% of this
+        route, so most of the path has not been directly observed" - and
+        was discarded anyway: the rule matched only the literal phrases
+        'cover', 'only part' and 'much/most of the route', never 'path',
+        and had no synonym for 'cover' at all.
+
+        Two independent signals satisfy the rule now: the percentage
+        itself stated outright, or a broadened set of phrase synonyms
+        ('observ', 'account for', 'path' alongside 'route', and so on).
+        The paragraph below was this exact test's own xfail case, which
+        passed on the broadened vocabulary alone - it states no percentage
+        at all, just "only a small stretch... has been observed".
+        """
+        text = ("A turbulence forecast calls for light conditions at cruise "
+                "altitude. Only a small stretch of the route has been "
+                "observed by anyone. You are seeing what is expected rather "
+                "than a measurement.")
+        v = verdict(text, **THIN_COVERAGE)
+        assert v.ok, v.reasons
+
 
 # ------------------------------------------------ defects: false positives
 
@@ -330,16 +352,17 @@ class TestLegitimateOutput:
 class TestKnownFalsePositives:
     """Correct paragraphs this validator still discards.
 
-    All four share one root cause, pinned by the last test in this class:
-    `_clauses` splits an enumeration on its commas, merges fragments shorter
-    than three words back into the clause that governs them, and leaves
-    longer fragments standing alone. A tail such as "or severe on this
-    route" is five words, so it becomes its own clause, and the negation
-    that governs it - "there is no basis" - is in the previous one.
+    One case left: the disclosure rule matches a fixed vocabulary - 'not
+    known', 'nothing is known', 'no <something> report|forecast',
+    'unknown', 'not the same as' - and a correct disclosure phrased outside
+    it is discarded. The thin-coverage rule had the same shape of bug
+    (fixed vocabulary: 'cover', 'only part', 'much/most of the route') and
+    is fixed; its regression guard now lives in TestLegitimateOutput.
 
-    The version on slide 7 survives only because its tail, "or severe.", is
-    two words and gets merged. Add a prepositional phrase or drop the Oxford
-    comma and the same sentence is discarded.
+    The two plain tests below are unrelated to that open case - they pin
+    the `_clauses` mechanism behind the five enumeration-scope false
+    positives fixed on 2026-09-06 (see TestLegitimateOutput), so a future
+    change to that mechanism doesn't quietly reopen them.
     """
 
     @pytest.mark.xfail(strict=True, reason=(
@@ -353,18 +376,6 @@ class TestKnownFalsePositives:
                 "product had no polygon over your route. An absence of "
                 "information is not calm air.")
         v = verdict(text)
-        assert v.ok, v.reasons
-
-    @pytest.mark.xfail(strict=True, reason=(
-        "an honest thin-coverage caveat that avoids the tokens 'cover', "
-        "'only part' and 'much/most of the route' does not satisfy the "
-        "rule"))
-    def test_a_thin_coverage_caveat_in_other_words_is_accepted(self):
-        text = ("A turbulence forecast calls for light conditions at cruise "
-                "altitude. Only a small stretch of the route has been "
-                "observed by anyone. You are seeing what is expected rather "
-                "than a measurement.")
-        v = verdict(text, **THIN_COVERAGE)
         assert v.ok, v.reasons
 
     def test_a_denial_keeps_its_scope_across_a_comma(self):

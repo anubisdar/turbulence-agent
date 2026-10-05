@@ -788,11 +788,28 @@ def respond(history: list[dict[str, str]], client: ChatClient | None = None,
         else None)
 
     # A flight number is the only thing that arrived - neither airport is
-    # otherwise known. Look the flight up for its real route rather than
-    # asking the user something a lookup can answer, or the model
-    # something it was told not to guess. Skipped entirely whenever
-    # either airport is already in hand: partial information from the
-    # user outranks a guess at which of an ident's legs is meant.
+    # otherwise known FOR THIS TURN. "Otherwise known" has to include what
+    # the last turn already established, not just this message on its
+    # own: clicking a suggested-flight chip sends nothing but the bare
+    # flight number (see index.html's addChatFlights), so a trip that was
+    # already confirmed last turn would otherwise look, right here, like
+    # it had never had airports at all - and get silently replaced by
+    # whatever route that flight number itself happens to fly, with no
+    # visible warning in the chat. Recover last turn's airports first, so
+    # that case instead falls through to the mismatch check below, which
+    # keeps the confirmed trip and only flags a disagreement.
+    prev_origin = prev_state.get("origin") if prev_state else None
+    prev_dest = prev_state.get("dest") if prev_state else None
+    if not origin_raw and not dest_raw and prev_origin and prev_dest:
+        origin_raw, dest_raw = prev_origin, prev_dest
+
+    # A flight number is the only thing that arrived - neither airport is
+    # otherwise known, even counting last turn's confirmed trip above.
+    # Look the flight up for its real route rather than asking the user
+    # something a lookup can answer, or the model something it was told
+    # not to guess. Skipped entirely whenever either airport is already
+    # in hand: partial information from the user, or a trip already on
+    # the books, outranks a guess at which of an ident's legs is meant.
     looked_up_route_this_turn = False
     if flight_number and not origin_raw and not dest_raw:
         looked_origin, looked_dest, lookup_note = _lookup_route(

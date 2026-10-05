@@ -376,8 +376,35 @@ def validate(text: str, facts: dict[str, Any]) -> Verdict:
 
     coverage = facts.get("route_coverage_fraction")
     if isinstance(coverage, (int, float)) and 0 < coverage < 0.34:
-        if not re.search(r"cover|only part|much of the route|most of the route",
-                         low):
+        # Observed in production: a KBOS-KPIT paragraph that gave the
+        # coverage fraction outright ("account for only about 10% of
+        # this route, so most of the path has not been directly
+        # observed... that stretch of route is simply unknown, which is
+        # not the same as being calm") was discarded anyway, because the
+        # old pattern only recognized "route" (not "path") after "most/
+        # much of the", and had no synonym for "cover" at all - "account
+        # for" and "observed" didn't count. A model free to carry the
+        # same uncertainty in its own words will reach for that
+        # vocabulary as often as the literal word "cover", so the check
+        # has to allow for it rather than name four fixed phrases.
+        #
+        # The number itself is the actual fact this rule cares about, so
+        # a paragraph that states it outright - "10%", rounded to match
+        # how the facts format it - is accepted on that alone, without
+        # needing to also guess the right surrounding words.
+        pct = f"{coverage:.0%}".rstrip("%")
+        # No trailing \b after "%": \b needs a word character on one
+        # side and a non-word character on the other, and "%" is itself
+        # non-word, so "...%\b" never matches "10% of" - the boundary
+        # never fires between "%" and the space after it. Caught by the
+        # test for this exact phrasing below.
+        states_the_number = re.search(
+            rf"\b{re.escape(pct)}\s*(%|percent\b)", low)
+        names_thin_coverage = re.search(
+            r"cover|observ|account(s|ed|ing)? for|only part|"
+            r"not .{0,20}(direct|known)|"
+            r"(much|most) of (the|this) (route|path)", low)
+        if not (states_the_number or names_thin_coverage):
             reasons.append("does not mention how little of the route is covered")
 
     return Verdict(not reasons, reasons)

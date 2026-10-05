@@ -526,6 +526,41 @@ class TestTurbulenceToggle:
             assert "available" in wx
 
 
+class TestWinnerCorridorReadingMatchesOutcome:
+    """outcome.reading and the winning corridor's own entry in data.corridors
+    are supposed to be the same number - _winner_reading() reads it as
+    result.winner.evidence.reading, and the winner's row in data.corridors
+    is supposed to be that same object. They silently came apart because
+    Corridor is frozen: gather_for_survivors() cannot attach evidence by
+    mutating a survivor, so it returns a replacement object, and
+    corridors_by_id used to be built only from the pre-enrichment originals
+    in level.generated. That left every corridor's reading - including the
+    winner's - permanently "unresolved" in the response, while the headline
+    verdict (read straight off the enriched object) was correct. A map
+    coloring a line by its own corridor's reading made this visible: the
+    line stayed the "unresolved" color on a route the headline called
+    moderate."""
+
+    def test_winner_entry_in_corridors_has_the_headline_reading(self, client):
+        data = do_search(client)
+        winner_id = data["outcome"]["winner"]
+        if winner_id is None:
+            pytest.skip("no winner in this run")
+        winner_row = next(c for c in data["corridors"] if c["id"] == winner_id)
+        assert winner_row["reading"] == data["outcome"]["reading"]
+
+    def test_a_resolved_outcome_is_not_silently_unresolved_on_the_map(self, client):
+        """The specific failure mode: outcome.reading says something real
+        while every corridor, including the winner, still says unresolved -
+        invisible until something actually reads the per-corridor field."""
+        data = do_search(client)
+        if data["outcome"]["reading"] == "unresolved":
+            pytest.skip("fixtures resolved to unresolved this run")
+        winner_id = data["outcome"]["winner"]
+        winner_row = next(c for c in data["corridors"] if c["id"] == winner_id)
+        assert winner_row["reading"] != "unresolved"
+
+
 class TestTurbulenceSummaryShape:
     """Fields the verdict strip reads. Renaming one empties part of the UI."""
 

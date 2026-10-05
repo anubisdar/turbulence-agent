@@ -6,6 +6,8 @@ in the wiring - so every scenario the plain loop handles is asserted to come
 out identical through the graph.
 """
 
+from dataclasses import replace
+
 import pytest
 
 from app.reasoning.controller import Budget, Stop, search
@@ -140,6 +142,25 @@ class TestParity:
         b = search_graph(gen, budget=Budget(max_tool_calls=calls), **kw)
         assert a.calls_used == b.calls_used
         assert a.depth_reached == b.depth_reached
+
+    @pytest.mark.parametrize("name,gen,kw,calls",
+                             SCENARIOS, ids=[s[0] for s in SCENARIOS])
+    def test_enriched_matches(self, name, gen, kw, calls):
+        """Every depth's enriched frontier, not just the final survivors -
+        see SearchResult.enriched. The graph accumulates it through state
+        the same way the plain loop accumulates it on the result object;
+        this is the one place that wiring could silently diverge without
+        test_survivors_match noticing, since survivors only ever reflects
+        the last depth."""
+        def enrich(corridors, budget):
+            return [replace(c, evidence=Evidence(reading=Severity.SEVERE))
+                    for c in corridors]
+
+        a = search(gen, budget=Budget(max_tool_calls=calls), enrich=enrich, **kw)
+        b = search_graph(gen, budget=Budget(max_tool_calls=calls), enrich=enrich, **kw)
+        assert set(a.enriched) == set(b.enriched)
+        for cid in a.enriched:
+            assert a.enriched[cid].evidence.reading == b.enriched[cid].evidence.reading
 
 
 class TestGraphMechanics:

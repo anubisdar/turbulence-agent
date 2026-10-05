@@ -400,6 +400,42 @@ body{transition:background .18s,color .18s}
   font-size:12px;color:var(--caution-ink);
 }
 
+/* A corridor stretch with no turbulence reading, marked on the map so it
+   doesn't read as "checked and clear" - --r-unresolved happens to share
+   its hex with the old generic corridor blue. Reuses the same advisory
+   tokens as .why rather than inventing a new color.
+
+   Parked well clear of the line rather than floating just above it: an
+   altitude sibling with no evidence draws its centerline almost exactly
+   on top of the evaluated sibling's (same ground track, different flight
+   level), and a short offset reads as "on the line" once the map is
+   zoomed out past a certain point - the offset becomes a few screen
+   pixels, same as sitting on it. So the pill sits a fixed, generous
+   distance up and to the right, with a dashed leader line and a dot
+   pinned to the exact spot on the actual (muted, --dead) unresolved
+   line, regardless of zoom. The leader is drawn as an SVG line rather
+   than a CSS border so it can run at an angle, not just straight down. */
+.unread-pill-wrap{background:none;border:none}
+.unread-callout{position:relative;width:190px;height:100px}
+.unread-leader{position:absolute;top:0;left:0;overflow:visible;pointer-events:none}
+.unread-leader-line{stroke:var(--caution-ink);stroke-width:1.5;stroke-dasharray:2,3;opacity:.85;fill:none}
+.unread-leader-dot{fill:var(--caution-ink);stroke:var(--void);stroke-width:2}
+.unread-pill{
+  position:absolute;left:54px;top:10px;
+  padding:2px 7px;border-radius:9px;background:var(--caution-bg);
+  border:1px solid var(--caution-ink);color:var(--caution-ink);
+  font:700 9.5px/1 var(--fm);letter-spacing:.05em;white-space:nowrap;
+  cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.4);
+}
+.unread-pop{font-size:12px;line-height:1.5;max-width:220px}
+.unread-pop .why-reason{color:var(--caution-ink);margin-bottom:6px}
+.unread-pop a{color:var(--live);font-weight:600;text-decoration:none}
+.unread-pop a:hover{text-decoration:underline}
+.trace-hit{background:var(--caution-bg);outline:1px solid var(--caution-ink)}
+.unread-popup .leaflet-popup-content-wrapper,
+.unread-popup .leaflet-popup-tip{background:var(--panel);color:var(--ink)}
+.unread-popup .leaflet-popup-close-button{color:var(--dim)}
+
 /* ---------------------------------------------------------- map + panes */
 .main{display:grid;grid-template-rows:1fr auto;min-height:0}
 #map{background:var(--void)}
@@ -678,6 +714,15 @@ function applyTheme(theme, redraw){
 let layers = {};      // corridor id -> {poly, line}
 let selected = null;
 let lastData = null;
+// SVG nodes added directly to the map's renderer for the winner watermark -
+// not Leaflet layers, so map.removeLayer never touches them. draw() owns
+// their whole lifecycle: torn down and rebuilt every call, same as layers.
+let winnerWatermarkNodes = [];
+let winnerWatermarkLabels = [];   // {pathEl, textEl} - repositioned on zoom
+let watermarkZoomHandler = null;
+// Recomputed once per draw() and reused by select(), which restyles a
+// single corridor on click without rerunning the whole dead-end scan.
+let lastDeadEnds = new Set();
 
 const $ = id => document.getElementById(id);
 
@@ -728,23 +773,233 @@ setUpChallenge();
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-function styleFor(props, isSel){
+// Reading -> the same --r-* tokens the verdict badge and header gauge
+// already use, so a line on the map and the word under it always agree.
+// A corridor with no reading yet (reasoning hasn't reached it, or the
+// evidence never resolved) falls back to --r-unresolved rather than a
+// severity it doesn't have evidence for.
+const READING_VAR = {
+  unresolved: '--r-unresolved', smooth: '--r-smooth', light: '--r-light',
+  moderate: '--r-moderate', severe: '--r-severe', extreme: '--r-extreme',
+};
+const severityColor = reading => cssVar(READING_VAR[reading] || READING_VAR.unresolved);
+
+function styleFor(props, isSel, deadEnd){
   const winner = props.is_winner, kept = props.kept;
+  const unread = kept && props.reading === 'unresolved';
+  // Color now carries what the corridor found (severity), not its role in
+  // the search - a pruned corridor was never flown, so its severity isn't
+  // the point of looking at it; it stays --dead regardless of reading. A
+  // dead end gets the same treatment for the same reason: it WAS flown
+  // and scored, but every branch it could have led to is gone, so its
+  // severity is no longer the point of looking at it either - a dead
+  // end that happened to read SEVERE has no business outranking a live
+  // sibling for the user's attention just because its color is louder.
+  // Role (selected / winner / pruned / dead end) is carried by weight,
+  // opacity and dash instead, same as it already was for everything but
+  // color.
+  const muted = !kept || deadEnd;
+  const col = muted ? cssVar('--dead') : severityColor(props.reading);
   return {
-    color: winner ? cssVar('--winner') : kept ? cssVar('--live') : cssVar('--dead'),
-    weight: isSel ? 2.5 : winner ? 2 : 1,
-    opacity: kept ? 0.95 : 0.65,
-    fillColor: winner ? cssVar('--winner') : kept ? cssVar('--live') : cssVar('--dead'),
-    fillOpacity: isSel ? 0.26 : winner ? 0.18 : kept ? 0.11 : 0.08,
-    dashArray: kept ? null : '5,5',
+    color: col,
+    // The winner gets a visibly heavier line, not just a different
+    // color, because a tied or higher-scored non-winning sibling can
+    // share almost the same ground track (an altitude branch, say) and
+    // the two translucent fills blend into an ambiguous third color
+    // wherever they overlap - weight and fillOpacity are what let the
+    // winner still read as "the one" inside that blend, not just color.
+    weight: isSel ? 2.5 : winner ? 3 : 1,
+    // A kept-but-unresolved corridor is still drawn in --r-unresolved's
+    // color (not muted like a pruned one - it's still under
+    // consideration), but at reduced opacity and dotted, so it reads as
+    // "open question" rather than competing with a real reading on a
+    // geometrically coincident altitude sibling (same ground track, so
+    // the lines draw on top of each other with nothing but color to
+    // tell them apart otherwise). A dead end uses the pruned corridor's
+    // own numbers, not its own tier, so "not live" looks like one
+    // consistent visual rule rather than two similar-but-different ones.
+    opacity: unread ? 0.55 : deadEnd ? 0.65 : kept ? 0.95 : 0.65,
+    fillColor: col,
+    // Winner well above an ordinary kept sibling (was 0.18 vs 0.11 - a
+    // difference too small to read once two fills are stacked); an
+    // ordinary non-winning survivor is pulled down a touch in exchange,
+    // so it still shows ("also considered") without outweighing the
+    // corridor the headline is actually about.
+    fillOpacity: isSel ? 0.26 : winner ? 0.4 : kept ? 0.08 : 0.08,
+    dashArray: unread ? '1,5' : (kept && !deadEnd) ? null : '5,5',
   };
 }
 
+// A low-opacity "WINNER" label stamped across the winner's own corridor
+// shape, clipped to that shape's exact outline via an SVG <clipPath> that
+// <use>s the live polygon path - never a copy of its "d" attribute, which
+// would go stale the moment Leaflet redraws the path on zoom. The <g> is
+// appended as a sibling of the polygon's own <path> (inside the same
+// Leaflet-managed, pan-transformed <g>), so it pans in lockstep for free;
+// only zoom actually changes the path's pixel geometry, which is why
+// draw() re-centers every label's text after each 'zoomend' rather than
+// leaving it at its draw-time position.
+function addWinnerWatermark(poly, c){
+  let pathEl = null;
+  poly.eachLayer(l => { if(l._path) pathEl = l._path; });
+  if(!pathEl || !pathEl.parentNode) return;
+
+  const safeId = String(c.id).replace(/[^\w-]/g, '_');
+  if(!pathEl.id) pathEl.id = `corridor-path-${safeId}`;
+
+  const ns = 'http://www.w3.org/2000/svg';
+  const clip = document.createElementNS(ns, 'clipPath');
+  clip.id = `winner-clip-${safeId}`;
+  clip.setAttribute('clipPathUnits', 'userSpaceOnUse');
+  const use = document.createElementNS(ns, 'use');
+  use.setAttributeNS('http://www.w3.org/1999/xlink', 'href', `#${pathEl.id}`);
+  clip.appendChild(use);
+
+  const g = document.createElementNS(ns, 'g');
+  g.setAttribute('clip-path', `url(#${clip.id})`);
+  g.setAttribute('pointer-events', 'none');
+  g.style.opacity = '0.55';
+  const text = document.createElementNS(ns, 'text');
+  text.setAttribute('font-family', 'ui-monospace,"SF Mono",Menlo,Consolas,monospace');
+  text.setAttribute('font-weight', '800');
+  text.setAttribute('font-size', '11');
+  text.setAttribute('letter-spacing', '.12em');
+  text.setAttribute('fill', severityColor(c.reading));
+  text.setAttribute('text-anchor', 'middle');
+  text.textContent = 'WINNER · WINNER · WINNER';
+  g.appendChild(text);
+
+  pathEl.parentNode.appendChild(clip);
+  pathEl.parentNode.appendChild(g);
+  winnerWatermarkNodes.push(clip, g);
+  winnerWatermarkLabels.push({pathEl, textEl: text});
+  repositionWatermarkLabel(pathEl, text);
+}
+
+function repositionWatermarkLabel(pathEl, text){
+  let box;
+  try{ box = pathEl.getBBox(); }catch(e){ return; }
+  if(!box || !box.width || !box.height) return;
+  const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+  text.setAttribute('x', cx);
+  text.setAttribute('y', cy);
+  text.setAttribute('transform', `rotate(-12 ${cx} ${cy})`);
+}
+
+// A corridor the search drew but never scored: pruned before evidence
+// gathering (prune_beam / prune_dominated / prune_budget all carry a
+// reason already), or a kept survivor the budget ran out on before its
+// turn (no reason field for a "keep" decision - the matching generator
+// note, prefixed "<id>: ", is the only record of why). Either way this
+// is "unexamined," not "found to be smooth," which --r-unresolved's
+// shared hex with the old corridor blue does not say on its own.
+function unresolvedReason(c, data){
+  if(c.reason) return c.reason;
+  const prefix = c.id + ': ';
+  const note = (data.generator_notes || []).find(n => n.startsWith(prefix));
+  if(note) return note.slice(prefix.length);
+  return 'No evidence was gathered for this stretch before the search ended.';
+}
+
+function openTrace(id){
+  const tab = document.querySelector('.tab[data-pane="trace"]');
+  if(tab) tab.click();
+  const pre = document.querySelector('#pane-trace pre');
+  if(!pre) return;
+  document.querySelectorAll('.trace-hit').forEach(s => s.classList.remove('trace-hit'));
+  const hit = [...pre.querySelectorAll('span')].find(s => s.textContent.includes(id));
+  if(hit){
+    hit.classList.add('trace-hit');
+    hit.scrollIntoView({block:'center', behavior:'smooth'});
+  }
+}
+
+// A corridor is "kept" the moment it survives pruning at its OWN depth -
+// that says nothing about whether the branch it started ever led
+// anywhere. "gc" scoring a real SEVERE reading from nine disagreeing
+// pilot reports, then having both its children (gc/high, gc/low) pruned
+// a depth later for being outside the beam, still drew at full strength:
+// solid severe-orange, same weight as a corridor still feeding the
+// eventual answer. On an UNRESOLVED route the dead branch was the only
+// saturated color on the whole map - "where is the red coming from,
+// nothing here rated severe?" was a fair question, because the thing
+// that *was* rated severe had already lost.
+//
+// Recursive, not just "my direct children are pruned": a child that is
+// itself a dead end (its own children all pruned, or itself a dead end)
+// counts the same as a pruned one, so a whole abandoned sub-tree mutes
+// together rather than leaving an intermediate node lit up for no
+// reason. A corridor with no children at all is a genuine leaf - the
+// search never tried to split it further - and is never a dead end
+// regardless of its score; that's what lets the real survivors
+// (including ties the winner beat) keep their own color.
+function deadEndIds(corridors){
+  const byDepth = id => id.split('/').length;
+  const dead = new Set();
+  const memo = new Map();
+  const isDead = c => {
+    if(memo.has(c.id)) return memo.get(c.id);
+    const prefix = c.id + '/';
+    const depth = byDepth(c.id) + 1;
+    const children = corridors.filter(
+      o => o.id.startsWith(prefix) && byDepth(o.id) === depth);
+    if(children.length === 0){ memo.set(c.id, false); return false; }
+    const result = children.every(ch => !ch.kept || isDead(ch));
+    memo.set(c.id, result);
+    return result;
+  };
+  corridors.forEach(c => { if(c.kept && isDead(c)) dead.add(c.id); });
+  return dead;
+}
+
+// Draw order, lowest priority first (later layers sit on top). Plain
+// score order isn't enough once siblings can share near-identical
+// geometry (altitude branches, a parent next to the child that split
+// off it): a tied or even lower-scored sibling with a real reading was
+// landing on top of the winner and completely hiding it whenever that
+// winner's own reading happened to be unresolved - the headline said
+// UNRESOLVED and the map showed nothing but a confident solid line.
+//
+// Unresolved corridors go last/top regardless of score or winner
+// status: their line is already drawn thin, muted and dotted (see
+// styleFor and the centerline style below), so stacking it above a
+// solid real-reading sibling adds a visible "nothing known here" cue
+// without hiding what's underneath. A corridor that is unresolved AND
+// the winner (exactly the KDFW-KMIA case that surfaced this) still
+// ends up on top either way. The winner otherwise outranks an ordinary
+// kept sibling, so the selected route is never buried under a
+// not-selected one just because the not-selected one scored higher at
+// an earlier, since-superseded depth. A dead end sorts with the pruned
+// corridors at the very bottom - it reads as "not live" now, same as
+// them, so it belongs under everything that still is.
+function zPriority(c, deadEnds){
+  if(!c.kept || deadEnds.has(c.id)) return 0;
+  if(c.reading === 'unresolved') return 3;
+  if(c.is_winner) return 2;
+  return 1;
+}
+
 function draw(data){
-  Object.values(layers).forEach(l => { map.removeLayer(l.poly); map.removeLayer(l.line); });
+  Object.values(layers).forEach(l => {
+    map.removeLayer(l.poly); map.removeLayer(l.line);
+    if(l.pill) map.removeLayer(l.pill);
+  });
   layers = {};
 
-  const order = [...data.corridors].sort((a,b) => a.kept - b.kept || a.score - b.score);
+  // Watermark nodes are plain SVG, not Leaflet layers - map.removeLayer
+  // above never touches them, so they're torn down by hand every redraw
+  // (search results, theme switch) along with the zoom listener that
+  // kept their draw-time position current.
+  winnerWatermarkNodes.forEach(n => n.remove());
+  winnerWatermarkNodes = [];
+  winnerWatermarkLabels = [];
+  if(watermarkZoomHandler) map.off('zoomend', watermarkZoomHandler);
+  watermarkZoomHandler = null;
+
+  const deadEnds = deadEndIds(data.corridors);
+  lastDeadEnds = deadEnds;
+  const order = [...data.corridors].sort(
+    (a,b) => zPriority(a, deadEnds) - zPriority(b, deadEnds) || a.score - b.score);
   const bounds = L.latLngBounds([]);
 
   order.forEach(c => {
@@ -753,30 +1008,90 @@ function draw(data){
     const lineF = feats.find(f => f.properties.kind === 'centerline');
     if(!polyF) return;
 
-    const poly = L.geoJSON(polyF, {style: styleFor(c, false)}).addTo(map);
+    const deadEnd = deadEnds.has(c.id);
+    const poly = L.geoJSON(polyF, {style: styleFor(c, false, deadEnd)}).addTo(map);
+    const unreadLine = c.kept && c.reading === 'unresolved';
+    const live = c.kept && !deadEnd;
     const line = L.geoJSON(lineF, {style:{
-      color: c.is_winner ? cssVar('--winner') : c.kept ? cssVar('--live') : cssVar('--dead'),
-      weight: c.is_winner ? 2 : 1, opacity: c.kept ? 0.9 : 0.6,
-      dashArray: c.kept ? null : '3,4',
+      color: live ? severityColor(c.reading) : cssVar('--dead'),
+      weight: c.is_winner ? 2 : 1,
+      opacity: unreadLine ? 0.5 : live ? 0.9 : 0.6,
+      dashArray: unreadLine ? '1,5' : live ? null : '3,4',
     }}).addTo(map);
+
+    if(c.is_winner) addWinnerWatermark(poly, c);
 
     poly.on('click', () => select(c.id));
     poly.bindTooltip(
-      `${c.id} &middot; ${c.score.toFixed(4)} &middot; ${c.kept ? 'kept' : 'pruned'}`,
+      `${c.id} &middot; ${c.score.toFixed(4)} &middot; `
+      + `${c.kept ? (deadEnd ? 'kept, dead end' : 'kept') : 'pruned'}`,
       {sticky:true, className:'ct'});
 
-    layers[c.id] = {poly, line};
+    let pill = null;
+    // Only for a corridor that still represents part of the route under
+    // consideration (kept, or a survivor split later discarded a child
+    // of) - not every depth-1 alternative the beam dropped outright,
+    // which already reads as muted/dashed and would just add noise. A
+    // dead end is excluded the same way: it's already drawn muted/dashed
+    // like a pruned corridor, and a "click to see why" callout on a
+    // branch nothing comes from would just be noise pointing at noise.
+    if(c.reading === 'unresolved' && !deadEnd && (c.kept || c.is_survivor) && lineF){
+      const coords = lineF.geometry.coordinates;
+      const [lon, lat] = coords[Math.floor(coords.length / 2)];
+      pill = L.marker([lat, lon], {
+        icon: L.divIcon({
+          className: 'unread-pill-wrap',
+          // iconAnchor pins (14,94) - the dot's own position - to the
+          // actual lat/lng, so the pill always lands a fixed distance
+          // away regardless of zoom; popupAnchor opens the popup near
+          // the pill itself, not at the anchor point under the dot.
+          iconSize: [190, 100],
+          iconAnchor: [14, 94],
+          popupAnchor: [84, -70],
+          html: '<div class="unread-callout">'
+              + '<svg class="unread-leader" width="190" height="100" viewBox="0 0 190 100">'
+              +   '<line x1="14" y1="94" x2="56" y2="34" class="unread-leader-line"/>'
+              +   '<circle cx="14" cy="94" r="3.5" class="unread-leader-dot"/>'
+              + '</svg>'
+              + '<div class="unread-pill">NOT EVALUATED</div></div>',
+        }),
+      }).addTo(map);
+      pill.bindPopup(() => {
+        const box = document.createElement('div');
+        box.className = 'unread-pop';
+        const reason = document.createElement('div');
+        reason.className = 'why-reason';
+        reason.textContent = unresolvedReason(c, data);
+        const link = document.createElement('a');
+        link.href = '#'; link.textContent = 'View in Trace →';
+        link.addEventListener('click', e => { e.preventDefault(); openTrace(c.id); });
+        box.append(reason, link);
+        return box;
+      }, {className: 'unread-popup'});
+    }
+
+    layers[c.id] = {poly, line, pill};
     bounds.extend(poly.getBounds());
   });
 
   if(bounds.isValid()) map.fitBounds(bounds, {padding:[40,40]});
+
+  // Panning moves the watermark for free (see addWinnerWatermark), but a
+  // zoom actually re-projects each polygon's path - only the clip, a live
+  // reference to that path, follows along on its own; the text's x/y have
+  // to be recomputed against the path's new on-screen bounding box.
+  if(winnerWatermarkLabels.length){
+    watermarkZoomHandler = () => winnerWatermarkLabels.forEach(
+      ({pathEl, textEl}) => repositionWatermarkLabel(pathEl, textEl));
+    map.on('zoomend', watermarkZoomHandler);
+  }
 }
 
 function select(id){
   selected = (selected === id) ? null : id;
   lastData.corridors.forEach(c => {
     const l = layers[c.id];
-    if(l) l.poly.setStyle(styleFor(c, c.id === selected));
+    if(l) l.poly.setStyle(styleFor(c, c.id === selected, lastDeadEnds.has(c.id)));
   });
   document.querySelectorAll('.row').forEach(r =>
     r.classList.toggle('sel', r.dataset.id === selected));
