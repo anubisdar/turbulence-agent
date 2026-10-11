@@ -4,6 +4,8 @@ langchain-anthropic>=0.3
 langchain-core>=0.3
 # transitive via langgraph; floor set for CVE-2026-104873 (fixed in 0.4.4)
 langgraph-sdk>=0.4.4
+# transitive via langgraph; floor set for CVE-2026-104873 (fixed in 0.4.4)
+langgraph-sdk>=0.4.4
 
 # web
 fastapi>=0.115
