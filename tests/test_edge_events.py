@@ -187,6 +187,34 @@ class TestIngestReadsRealLogShapes:
         assert {e["detail"] for e in events} == {
             "path traversal", "remote command execution"}
 
+    def _violation_line(self, uid, host):
+        import json
+
+        return json.dumps({"level": "error", "ts": 1787516236.7,
+                           "logger": "http.handlers.waf",
+                           "msg": "WAF rule violation detected",
+                           "hostname": host, "uri": "/", "unique_id": uid})
+
+    def test_another_sites_detections_are_not_counted(self):
+        """The firewall fronts every site on this Caddy. Only the request
+        the firewall interrupted names its host, under the same id."""
+        module = self._module()
+        lines = [
+            self._waf_line(uid="other", score=5),
+            self._violation_line("other", "www.adeptsecurity.net"),
+            self._waf_line(uid="mine", score=5),
+            self._violation_line("mine", "turbulence.adeptsecurity.net"),
+        ]
+        events = module.read_waf(lines, {})
+        assert len({e["dedup_key"] for e in events}) == 1
+
+    def test_a_detection_with_no_host_line_is_still_counted(self):
+        """A match below the blocking threshold never gets a host line, and
+        losing it would make this site's own numbers smaller."""
+        module = self._module()
+        events = module.read_waf([self._waf_line(uid="quiet")], {})
+        assert len(events) == 1
+
     def test_a_bare_path_keeps_its_query(self):
         """Stripping it makes every injection look like "/", because the
         payload is in the query and the path is bare."""

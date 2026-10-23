@@ -69,6 +69,14 @@ _ATTACK_NAMES = {
     "attack-generic": "generic attack",
 }
 
+#: The firewall runs in front of every site on this Caddy, and its journal
+#: lines do not say which site a rule matched on - the rule line's hostname
+#: field is empty. The line Coraza writes when it interrupts a request does
+#: carry the Host header, under the same unique_id. Only this site's own
+#: detections belong in this database.
+OWN_HOST = os.environ.get("TURBULENCE_HOST",
+                          "turbulence.adeptsecurity.net").lower()
+
 _ANOMALY_RULE = "949110"
 _SCORE = re.compile(r"Total Score:\s*(\d+)")
 _UNIQUE_ID = re.compile(r'\[unique_id "([^"]+)"')
@@ -198,6 +206,21 @@ def read_waf(lines: list[str], cache: dict,
     """
     requests: dict[str, dict] = {}
 
+    # Which site each interrupted request was for. A request with no such
+    # line (a match below the blocking threshold) has no known host and is
+    # kept, so a missing line never makes this site's own counts smaller.
+    hosts: dict[str, str] = {}
+    for line in lines:
+        if "WAF rule violation detected" not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        uid, host = entry.get("unique_id"), entry.get("hostname")
+        if uid and host:
+            hosts[uid] = str(host).lower()
+
     for line in lines:
         if "http.handlers.waf" not in line:
             continue
@@ -231,6 +254,8 @@ def read_waf(lines: list[str], cache: dict,
 
     events = []
     for unique_id, rec in requests.items():
+        if hosts.get(unique_id, OWN_HOST) != OWN_HOST:
+            continue
         when = datetime.fromtimestamp(rec["ts"] or 0,
                                       timezone.utc).isoformat()
         country, network = _origin(cache, rec["ip"]) if rec["ip"] \
